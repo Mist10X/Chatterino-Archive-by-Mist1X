@@ -94,7 +94,10 @@ class QtTests(unittest.TestCase):
         self.assertEqual(m.total_caption.font().pointSizeF(),15)
         self.assertTrue(m.total_caption.alignment() & Qt.AlignTop)
     def test_narrow_layout_scroll_focus_and_scaled_fonts(self):
-        self.app.resize(640,420);QTest.qWait(120)
+        self.app.resize(640,420)
+        # Layout timers can take more than 120 ms on a busy Windows CI runner.
+        # Wait for the actual invariant instead of weakening the layout check.
+        wait_until(lambda:self.app.pages.widget(0).horizontalScrollBar().maximum()==0 and self.app.pages.widget(0).verticalScrollBar().maximum()>0)
         self.assertEqual(self.app.width(),640);self.assertEqual(self.app.height(),420)
         trim=self.app.responsive.quick_trim;point=trim.mapTo(self.app,QPoint(0,0))
         self.assertGreaterEqual(point.x(),0);self.assertLessEqual(point.x()+trim.width(),640);self.assertLess(point.y()+trim.height(),350)
