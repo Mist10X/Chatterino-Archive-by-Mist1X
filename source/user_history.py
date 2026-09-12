@@ -42,7 +42,10 @@ class UserHistory:
             for f in (p,Path(str(p)+'-wal')):
                 try:files.append((str(f),f.stat().st_size,f.stat().st_mtime_ns))
                 except OSError:pass
-        signature=(user,self.archive.db.total_changes,self.mod.db.total_changes,tuple(files))
+        rules_path=self.archive.data/'reward-rules.json'
+        try:rules_stamp=rules_path.stat().st_mtime_ns
+        except OSError:rules_stamp=0
+        signature=(user,self.archive.db.total_changes,self.mod.db.total_changes,tuple(files),rules_stamp)
         if signature!=self.signature:
             rows={};messages={};warnings=[]
             def message(m,origin):
@@ -67,7 +70,7 @@ class UserHistory:
             contexts=[]
             for raw in self.mod.db.execute("SELECT * FROM events WHERE user=? AND kind IN ('ban','timeout','delete','unban','untimeout','speech')",(user,)):
                 row=dict(raw);row['context']=json.loads(row['context']);row['message']=json.loads(row['message']) if row['message'] else None
-                row['status'],row['active']=self.mod.status(raw);self.mod.combined.enrich(row);rows[row['key']]=row
+                row['status'],row['active']=self.mod.status(raw);self.mod.combined.enrich(row);self.mod.evidence.enrich(row);rows[row['key']]=row
                 contexts.extend(row['context'])
                 if row['kind']=='delete' and row['message'] and row['message'].get('state')=='available':contexts.append(row['message'])
             # Context messages may lack a Twitch ID; join only a unique text/time match.
@@ -133,4 +136,5 @@ def event_blocks(row):
         blocks.extend(message_blocks(m,local_time))
     if row.get('raw'):blocks.append({'text':row['raw'],'style':'meta'})
     if row['kind']=='ban':blocks.append({'text':'Сообщение перед баном не обязательно является его причиной. Отсутствие записи в ответе сервиса не подтверждает разбан.','style':'meta'})
-    return blocks
+    from moderation_evidence import attribution_blocks
+    return blocks+attribution_blocks(row)

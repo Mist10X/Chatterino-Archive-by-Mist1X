@@ -4,9 +4,9 @@ APP_NAME = 'Архив Chatterino by Mist1X'
 
 AUTHOR = 'Mist1X'
 
-VERSION = '0.17.0'
+VERSION = '0.18.0'
 
-VERSION_TUPLE = (0, 17, 0, 0)
+VERSION_TUPLE = (0, 18, 0, 0)
 
 EXE_STEM = 'ChatterinoArchive-by-Mist1X'
 

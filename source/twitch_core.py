@@ -103,7 +103,9 @@ def settings_load(folder):
 def settings_validate(value):
     channels = sorted({name(ch) for ch in value.get('channels', [])})
     if len(channels) > 100:raise ValueError('Можно выбрать до 100 каналов; Twitch также учитывает другие клиенты аккаунта.')
-    return {'enabled': value.get('enabled') is True, 'channels': channels, 'tray': value.get('tray', True) is True}
+    result={'enabled': value.get('enabled') is True, 'channels': channels, 'tray': value.get('tray', True) is True}
+    if value.get('moderation_details'):result['moderation_details']=True
+    return result
 
 
 def settings_save(folder, value):

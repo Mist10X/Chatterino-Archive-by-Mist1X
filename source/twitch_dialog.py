@@ -25,6 +25,12 @@ class TwitchDialog(Dialog):
         self.cancel_auth = Button('Отменить вход', app.theme, lambda: app.twitch.command('cancel_auth'))
         buttons.addWidget(self.browser);buttons.addWidget(self.cancel_auth);self.layout.addWidget(row)
         self.enabled = QCheckBox('Записывать сообщения напрямую из Twitch');self.enabled.setChecked(app.twitch_config['enabled']);self.layout.addWidget(self.enabled)
+        self.moderation_details=QCheckBox('Получать имена модераторов (где у меня есть права)')
+        self.moderation_details.setChecked(app.twitch_config.get('moderation_details',False));self.layout.addWidget(self.moderation_details)
+        self.layout.addWidget(label('После включения нужен новый вход Twitch. Разрешения только на чтение. Покупки наград через Twitch API доступны на собственном канале; на чужих используем доступные сообщения наград и подтверждения ботов.',9,True))
+        self.event_status=label('',9,True);self.layout.addWidget(self.event_status)
+        from reward_dialog import RewardDialog
+        self.layout.addWidget(Button('Награды: мут и анмут',app.theme,lambda:RewardDialog(app).exec()))
         self.layout.addWidget(label('Каналы — по одному в строке. Закрытие вкладки Chatterino не убирает канал из этого списка.', 10, True))
         self.channels = QPlainTextEdit();self.channels.setPlaceholderText('morphe_ya\ndangerlyoha');self.channels.setPlainText('\n'.join(app.twitch_config['channels']))
         self.channels.setMinimumHeight(150);self.layout.addWidget(self.channels, 1)
@@ -37,6 +43,8 @@ class TwitchDialog(Dialog):
         self.finished.connect(lambda: self.timer.stop())
 
     def connect_account(self):
+        value=settings_save(self.app.data/'twitch',{**self.app.twitch.config,'moderation_details':self.moderation_details.isChecked()})
+        self.app.twitch_config=value;self.app.twitch.command('config',value)
         self.open_requested = True;self.app.twitch.command('auth')
 
     def open_browser(self):
@@ -45,6 +53,7 @@ class TwitchDialog(Dialog):
 
     def refresh(self):
         state = self.app.twitch.snapshot();self.live.setText(state['text'])
+        self.event_status.setText(self.app.moderation_events.text)
         pending = state['phase'] == 'auth';has_code = bool(state['auth_url'])
         self.connect_button.setEnabled(not pending);self.disconnect_button.setEnabled(bool(state['login']))
         self.browser.setVisible(has_code);self.cancel_auth.setVisible(pending);self.code.setVisible(has_code)
@@ -61,7 +70,7 @@ class TwitchDialog(Dialog):
 
     def save(self):
         try:
-            value = settings_save(self.app.data / 'twitch', {'enabled': self.enabled.isChecked(), 'tray': self.tray.isChecked(),
+            value = settings_save(self.app.data / 'twitch', {'enabled': self.enabled.isChecked(), 'tray': self.tray.isChecked(),'moderation_details':self.moderation_details.isChecked(),
                 'channels': [ch for ch in self.channels.toPlainText().splitlines() if ch.strip()]})
             self.app.twitch_config = value;self.app.twitch.command('config', value);self.app.import_channels();self.accept()
         except (ValueError, OSError) as exc:self.error.setText(str(exc))

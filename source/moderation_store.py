@@ -45,6 +45,8 @@ class ModerationIndex:
         self.db.commit()
         from shared_moderation import SharedModeration
         self.combined=SharedModeration(self)
+        from moderation_evidence import Evidence
+        self.evidence=Evidence(self)
 
     def ingest_deletion(self,e):
         channel=name(e['channel']);user=name(e['user']) if e.get('user') else ''
@@ -79,6 +81,7 @@ class ModerationIndex:
         return 1
 
     def ingest(self, e):
+        if isinstance(e,dict) and e.get('kind') in ('executor','reward','bot_result'):return self.evidence.ingest(e)
         if not isinstance(e, dict) or e.get('kind') not in KINDS:
             raise ValueError('Unknown moderation event')
         if e['kind']=='delete':return self.ingest_deletion(e)
@@ -162,7 +165,7 @@ class ModerationIndex:
     def sync(self,max_seconds=None):
         changed=0
         deadline=time.monotonic()+max_seconds if max_seconds is not None else float('inf')
-        sources=((1,self.data/'moderation.jsonl'),(2,self.data/'twitch/deletions.jsonl'),(3,self.data/'twitch/identities.jsonl'))
+        sources=((1,self.data/'moderation.jsonl'),(2,self.data/'twitch/deletions.jsonl'),(3,self.data/'twitch/identities.jsonl'),(4,self.data/'twitch/activity.jsonl'))
         start=getattr(self,'_sync_cursor',0)%len(sources)
         for step in range(len(sources)):
             pos=(start+step)%len(sources);ingestion_id,path=sources[pos];self._sync_cursor=(pos+1)%len(sources)
@@ -227,6 +230,7 @@ class ModerationIndex:
             return
 
     def status(self, row, now=None):
+        if row['kind'] in ('unban','untimeout'):return ('Подтверждено снятие бана' if row['kind']=='unban' else 'Подтверждено снятие мута'),False
         now=int(time.time()*1000) if now is None else now
         user,channel,stamp=row['user'],row['channel'],row['at_ms']
         if row['kind']=='delete':
@@ -296,7 +300,7 @@ class ModerationIndex:
             if uid:
                 for message in [*result['context'],result['message']]:
                     if isinstance(message,dict) and not message.get('user_id'):message['user_id']=uid
-            rows.append(self.combined.enrich(result))
+            rows.append(self.evidence.enrich(self.combined.enrich(result)))
         hint=None
         if user.strip():
             hint=self.db.execute('''SELECT n,at_seconds FROM shared_hints h JOIN identities i ON h.user_id=i.user_id

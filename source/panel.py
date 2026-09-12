@@ -55,6 +55,8 @@ class App(QMainWindow):
         try:self.twitch_config=settings_load(self.data/'twitch')
         except (ValueError,OSError):self.twitch_config={'enabled':False,'channels':[],'tray':True}
         self.twitch=TwitchWorker(self.data,self.twitch_config)
+        from moderation_events import ModerationEvents
+        self.moderation_events=ModerationEvents(self.twitch)
         from shared_bans import SharedService
         self.shared=SharedService(self.data,token=lambda:(self.twitch.account or {}).get('access_token'),network=self.network,connection_state=self.twitch.snapshot)
         self.shared.start()
@@ -82,6 +84,7 @@ class App(QMainWindow):
         if not self.control.revision:self.control.save()
         self.worker.start();self.mod_view.request();self.refresh_users()
         if self.network:
+            self.moderation_events.start()
             self.twitch.command('users',self.control.users);self.replays.start();self.twitch.start();self.setup_tray()
         if self.control.users:self.choose_user(sorted(self.control.users)[0])
         self.timer=QTimer(self);self.timer.setInterval(100);self.timer.timeout.connect(self.poll);self.timer.start()
@@ -461,6 +464,7 @@ class App(QMainWindow):
             return
         if not getattr(self,"replays_closed",False):
             self.replays_closed=True;self.replay_view.close()
+            self.moderation_events.stop()
             self.shared.stopped.set()
             if getattr(self,'shared_window',None):self.shared_window.close()
         self.twitch.stopped.set()
@@ -474,6 +478,10 @@ class App(QMainWindow):
         try:self.theme.save()
         except OSError:pass
         event.accept()
+        if self.exit_requested:
+            if self.tray:self.tray.hide()
+            # Closing an already hidden tray window does not emit lastWindowClosed.
+            QTimer.singleShot(0,QApplication.instance().quit)
 
 def default_profile():
     executable=Path(sys.executable if getattr(sys,'frozen',False) else __file__).resolve()

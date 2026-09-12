@@ -171,7 +171,8 @@ class ModerationView:
             if message and message.get('state')=='available':blocks.extend(message_blocks(message,local_time))
             else:blocks.append({'text':'Сообщение удалено, исходный текст недоступен.','style':'body'})
             blocks.append({'text':'Сопоставление с наказанием проверяется в пределах следующей минуты по тому же пользователю и каналу. Это не доказывает причину наказания.','style':'meta'})
-            self.preview.set_blocks(blocks);return
+            from moderation_evidence import attribution_blocks
+            self.preview.set_blocks(blocks+attribution_blocks(row));return
         kind='БАН' if row['kind']=='ban' else 'МУТ';need=10 if row['kind']=='ban' else 5
         blocks=[{'text':f"{kind} · {row['user']} · #{row['channel']} · {stamp(row['at_ms'])}",'style':'title'},
             {'text':row['status'],'style':'meta'}]
@@ -184,4 +185,5 @@ class ModerationView:
             blocks.extend(message_blocks(message,local_time))
         if len(row['context'])<need:blocks.append({'text':'Остальные сообщения не были доступны в полученной истории.','style':'meta'})
         blocks.append({'text':'Системное сообщение Chatterino:\n'+row['raw'],'style':'meta'})
-        self.preview.set_blocks(blocks)
+        from moderation_evidence import attribution_blocks
+        self.preview.set_blocks(blocks+attribution_blocks(row))

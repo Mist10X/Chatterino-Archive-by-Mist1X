@@ -21,6 +21,8 @@ class TwitchWorker(threading.Thread):
         self.state = {'phase': 'off', 'text': 'Twitch не подключён', 'login': '', 'joined': [], 'saved': 0, 'deleted': 0,
             'auth_url': '', 'auth_code': '', 'auth_retries':0, 'auth_reason':''}
         self.replay = None;self.identity_seen={}
+        from moderation_evidence import EvidenceWriter
+        self.evidence=EvidenceWriter(data)
         self.users = {};self.account = None;self.auth = None;self.connection = None
         self.joined = set();self.pending = {};self.failed = set();self.buffer = b''
         self.join_retries={};self.join_attempts={};self.channel_errors={}
@@ -68,7 +70,7 @@ class TwitchWorker(threading.Thread):
         if result.get('client_id') != CLIENT_ID or not set(SCOPES) <= set(result.get('scopes', [])):
             raise TwitchError('rights', 'Вход Twitch не содержит нужного разрешения. Подключи аккаунт заново.')
         if not result.get('login') or not result.get('user_id'):raise TwitchError('rights')
-        self.account.update(login=result['login'], user_id=result['user_id'])
+        self.account.update(login=result['login'], user_id=result['user_id'],scopes=result.get('scopes',[]))
         self.auth_failures=0;self.refresh_rejections=0;self.auth_blocked=False
         self.next_validate = self.clock() + 3600
         self.token_deadline = self.clock() + max(0, int(result.get('expires_in', 0)))
@@ -98,7 +100,9 @@ class TwitchWorker(threading.Thread):
 
     def start_auth(self):
         self.close_socket();self.auth = None;self.auth_blocked=False;self.report(phase='auth', text='Открываем вход Twitch…', auth_url='', auth_code='')
-        result = self.api.request('device', {'client_id': CLIENT_ID, 'scopes': ' '.join(SCOPES)})
+        from moderation_evidence import MOD_SCOPES,REWARD_SCOPE
+        scopes=SCOPES+(MOD_SCOPES+[REWARD_SCOPE,'user:read:moderated_channels'] if self.config.get('moderation_details') else [])
+        result = self.api.request('device', {'client_id': CLIENT_ID, 'scopes': ' '.join(scopes)})
         from urllib.parse import urlparse
         url = result.get('verification_uri', '');parsed = urlparse(url)
         if parsed.scheme != 'https' or parsed.hostname != 'www.twitch.tv' or parsed.path != '/activate':
@@ -289,6 +293,7 @@ class TwitchWorker(threading.Thread):
                 'id':tags.get('id',''),'user':tags.get('login',''),'text':tags.get('system-msg','')+(' · '+params[1] if len(params)>1 else '')},tags)
         elif command == 'PRIVMSG':
             record = chat_record(params, tags, prefix)
+            if record and self.config['enabled'] and record['channel'] in self.wanted_channels():self.evidence.chat(record,tags)
             if record and record['channel'] not in self.joined:self.confirm_channel(record['channel'])
             if record and self.replay and self.config['enabled']:
                 self.replay.push(dict(record,kind='message',at=int(tags['tmi-sent-ts']),color=tags.get('color',''),raw_text=params[1]),tags)
