@@ -1,0 +1,42 @@
+{
+
+  "name": "History Tools by Mist1X",
+
+  "description": "Архив Chatterino by Mist1X — запись сообщений, ответов, банов и мутов. /hhelp — справка.",
+
+  "authors": [
+
+    "Mist1X"
+
+  ],
+
+  "tags": [
+
+    "history",
+
+    "local-archive"
+
+  ],
+
+  "version": "0.10.0",
+
+  "license": "MIT",
+
+  "permissions": [
+
+    {
+
+      "type": "FilesystemRead"
+
+    },
+
+    {
+
+      "type": "FilesystemWrite"
+
+    }
+
+  ]
+
+}
+
