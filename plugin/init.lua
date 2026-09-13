@@ -4,8 +4,9 @@ local protocol = require('panel_protocol')
 
 local moderation_core = require('moderation_core')
 
-local VERSION = '0.10.0'
-local settings = {users={}, channels={}, keep=1000, revision=''}
+local VERSION = '0.11.0'
+local settings = {users={}, channels={}, keep=1000, revision='',auto_trim=false,
+    auto_trim_interval=3600,auto_trim_keep=1000,trim_preserved={}}
 
 local bindings, archives, errors = {}, {}, {}
 
@@ -14,6 +15,7 @@ local config_error, trimming, last_request = nil, false, ''
 local discovery = 'saved_tabs'
 local open_channels = nil
 local moderation, moderation_error
+local auto_trim_last_ms, auto_trim_elapsed_ms, auto_trim_result = 0, 0, ''
 
 local function now_ms()
 
@@ -166,6 +168,14 @@ local function configure()
         local previous = settings
 
         settings = new
+        local auto_changed=previous.auto_trim~=new.auto_trim
+            or previous.auto_trim_interval~=new.auto_trim_interval
+            or previous.auto_trim_keep~=new.auto_trim_keep
+        if not auto_changed then
+            for channel in pairs(previous.trim_preserved or {}) do if not new.trim_preserved[channel] then auto_changed=true;break end end
+            for channel in pairs(new.trim_preserved or {}) do if not (previous.trim_preserved or {})[channel] then auto_changed=true;break end end
+        end
+        if auto_changed then auto_trim_last_ms=now_ms();auto_trim_elapsed_ms=0;auto_trim_result='' end
 
         local had_errors = next(errors) ~= nil
 
@@ -387,6 +397,33 @@ local function process_request()
 
 end
 
+local function process_auto_trim()
+    auto_trim_elapsed_ms=auto_trim_elapsed_ms+2000
+    if not settings.auto_trim then return end
+    local now=now_ms()
+    local due=(now>0 and auto_trim_last_ms>0 and now-auto_trim_last_ms>=settings.auto_trim_interval*1000)
+        or ((now<=0 or auto_trim_last_ms<=0) and auto_trim_elapsed_ms>=settings.auto_trim_interval*1000)
+    if not due then return end
+    auto_trim_last_ms=now;auto_trim_elapsed_ms=0
+    if not open_channels then auto_trim_result='Не удалось получить открытые каналы';return end
+    local targets={}
+    for channel in pairs(open_channels) do
+        if not (settings.trim_preserved or {})[channel] then targets[#targets+1]=channel end
+    end
+    table.sort(targets)
+    local removed_total,failures=0,0
+    for _,name in ipairs(targets) do
+        local channel=c2.Channel.by_name(name)
+        if channel and channel:is_valid() and channel:get_type()==c2.ChannelType.Twitch
+                and channel:count_messages()>settings.auto_trim_keep then
+            local ok,_,removed=pcall(trim_channel,channel,settings.auto_trim_keep)
+            if ok then removed_total=removed_total+removed else failures=failures+1 end
+        end
+    end
+    auto_trim_result='Обработано каналов: '..#targets..'; убрано сообщений: '..removed_total
+    if failures>0 then auto_trim_result=auto_trim_result..'; ошибок: '..failures end
+end
+
 
 
 local function publish()
@@ -430,7 +467,9 @@ local function publish()
 
         .. core.quote(settings.revision) .. ',"channels":[' .. table.concat(channels, ',')
 
-        .. '],"trim_except":true,"discovery":' .. core.quote(discovery) .. ',"moderation_unparsed":'..tostring(moderation and moderation.unparsed or 0)
+        .. '],"trim_except":true,"auto_trim":'..(settings.auto_trim and 'true' or 'false')
+        .. ',"auto_trim_interval":'..tostring(settings.auto_trim_interval)..',"auto_trim_keep":'..tostring(settings.auto_trim_keep)
+        .. ',"auto_trim_result":'..core.quote(auto_trim_result)..',"discovery":' .. core.quote(discovery) .. ',"moderation_unparsed":'..tostring(moderation and moderation.unparsed or 0)
         .. ',"error":' .. core.quote(problem) .. '}\n')
 
 end
@@ -452,6 +491,10 @@ local function tick()
     local requested, request_error = pcall(process_request)
 
     if not requested then config_error = tostring(request_error) end
+
+    local auto_trimmed, auto_trim_error = pcall(process_auto_trim)
+
+    if not auto_trimmed then auto_trim_result='Ошибка: '..tostring(auto_trim_error) end
 
     local published, publish_error = pcall(publish)
 
@@ -517,9 +560,9 @@ end)))
 
 assert(c2.register_command('/hcheck', command(function(ctx)
 
-    write('selfcheck.txt', 'History Tools by Mist1X 0.8.0 read/write check\n')
+    write('selfcheck.txt', 'History Tools by Mist1X 0.11.0 read/write check\n')
 
-    assert(read('selfcheck.txt') == 'History Tools by Mist1X 0.8.0 read/write check\n', 'Read/write failed')
+    assert(read('selfcheck.txt') == 'History Tools by Mist1X 0.11.0 read/write check\n', 'Read/write failed')
 
     notify(ctx.channel, 'Чтение и запись работают. Сообщений в Twitch не отправлено.')
 

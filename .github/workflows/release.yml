@@ -32,9 +32,20 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build source/ChatterinoArchive-by-Mist1X.spec
       - name: Package and verify
         run: python tools/build_release.py
+      - name: Ensure installer compiler
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --version=6.7.3 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot install Inno Setup' }
+          }
+      - name: Build installer
+        run: python tools/build_installer.py
       - name: Create draft release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$env:RELEASE_TAG" releases/ChatterinoArchive-Windows-x64.zip releases/SHA256SUMS.txt --verify-tag --draft --title "$env:RELEASE_TAG" --notes-file RELEASE-NOTES.md
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          gh release create "$env:RELEASE_TAG" releases/ChatterinoArchive-Windows-x64.zip "releases/ChatterinoArchive-Setup-$version-x64.exe" releases/SHA256SUMS.txt --verify-tag --draft --title "$env:RELEASE_TAG" --notes-file RELEASE-NOTES.md

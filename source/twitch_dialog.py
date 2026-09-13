@@ -25,9 +25,9 @@ class TwitchDialog(Dialog):
         self.cancel_auth = Button('Отменить вход', app.theme, lambda: app.twitch.command('cancel_auth'))
         buttons.addWidget(self.browser);buttons.addWidget(self.cancel_auth);self.layout.addWidget(row)
         self.enabled = QCheckBox('Записывать сообщения напрямую из Twitch');self.enabled.setChecked(app.twitch_config['enabled']);self.layout.addWidget(self.enabled)
-        self.moderation_details=QCheckBox('Получать имена модераторов (где у меня есть права)')
+        self.moderation_details=QCheckBox('Получать имена модераторов и сообщения AutoMod (где у меня есть права)')
         self.moderation_details.setChecked(app.twitch_config.get('moderation_details',False));self.layout.addWidget(self.moderation_details)
-        self.layout.addWidget(label('После включения нужен новый вход Twitch. Разрешения только на чтение. Покупки наград через Twitch API доступны на собственном канале; на чужих используем доступные сообщения наград и подтверждения ботов.',9,True))
+        self.layout.addWidget(label('После включения нужен новый вход Twitch. Twitch называет доступ к очереди AutoMod разрешением управления, но архив только получает события и не одобряет, не отклоняет и не удаляет сообщения. Покупки наград через Twitch API доступны на собственном канале.',9,True))
         self.event_status=label('',9,True);self.layout.addWidget(self.event_status)
         from reward_dialog import RewardDialog
         self.layout.addWidget(Button('Награды: мут и анмут',app.theme,lambda:RewardDialog(app).exec()))

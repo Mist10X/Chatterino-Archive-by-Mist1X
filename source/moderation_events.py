@@ -2,11 +2,21 @@
 import json,threading,time,urllib.request,urllib.parse,urllib.error
 from collections import deque
 import websocket
-from moderation_evidence import MOD_SCOPES,REWARD_SCOPE,millis
+from moderation_evidence import MOD_SCOPES,REWARD_SCOPE,AUTOMOD_SCOPE,millis
 from twitch_core import CLIENT_ID
 
 def notification(payload,stamp):
     event=payload['event'];typ=payload['subscription']['type']
+    if typ=='automod.message.hold':
+        message=event.get('message',{})
+        text=message.get('text','') if isinstance(message,dict) else message
+        return {'kind':'automod','user':event['user_login'].lower(),'channel':event['broadcaster_user_login'].lower(),
+            'at_ms':millis(event.get('held_at',stamp)),'source':'twitch_eventsub','time_basis':'eventsub',
+            'message_id':event['message_id'],'message':{'state':'available','id':event['message_id'],
+                'user':event['user_login'].lower(),'display_name':event.get('user_name',event['user_login']),
+                'user_id':event.get('user_id',''),'channel':event['broadcaster_user_login'].lower(),'text':text,
+                'time_utc':event.get('held_at',stamp),'source':'twitch_automod','automod':True},
+            'raw':'Задержано AutoMod'}
     if typ.startswith('channel.channel_points_custom_reward_redemption.'):
         return {'kind':'reward','id':event['id'],'channel':event['broadcaster_user_login'].lower(),'buyer':event['user_login'].lower(),
             'reward':event['reward']['id'],'title':event['reward']['title'],'input':event['user_input'],
@@ -45,6 +55,8 @@ class ModerationEvents(threading.Thread):
                 if not cursor:break
             if account['login'] in wanted:channels[account['login']]=uid
         subs=[{'type':'channel.moderate','version':'2','condition':{'broadcaster_user_id':bid,'moderator_user_id':uid}} for bid in channels.values()]
+        if AUTOMOD_SCOPE in scopes:
+            subs += [{'type':'automod.message.hold','version':'1','condition':{'broadcaster_user_id':bid,'moderator_user_id':uid}} for bid in channels.values()]
         if REWARD_SCOPE in scopes and account['login'] in wanted:
             subs += [{'type':'channel.channel_points_custom_reward_redemption.'+suffix,'version':'1','condition':{'broadcaster_user_id':uid}} for suffix in ('add','update')]
         return subs
@@ -65,8 +77,8 @@ class ModerationEvents(threading.Thread):
             account=dict(self.twitch.account or {})
             if not self.twitch.config.get('moderation_details') or not self.twitch.config.get('enabled'):
                 self.stopped.wait(.5);continue
-            if not account.get('access_token') or not set(MOD_SCOPES)<=set(account.get('scopes',[])):
-                self.text='Для имён модераторов нужен отдельный вход с расширенным доступом.';self.stopped.wait(1);continue
+            if not account.get('access_token') or not set(MOD_SCOPES+[AUTOMOD_SCOPE])<=set(account.get('scopes',[])):
+                self.text='Для имён модераторов и AutoMod нужен новый вход с расширенным доступом.';self.stopped.wait(1);continue
             connection=None
             try:
                 subs=self.subscriptions(account)

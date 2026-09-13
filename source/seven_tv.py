@@ -156,19 +156,18 @@ class SevenTV(QObject):
         self.seen_users[uid]=time.monotonic();self.seen_users.move_to_end(uid)
         while len(self.seen_users)>5000:self.seen_users.popitem(last=False)
         cached=self.store.personal.get(uid)
-        if not force and cached and time.time()-cached.get('observed_at',0)<900:return
+        if not force and cached and cached.get('version')==2 and time.time()-cached.get('observed_at',0)<900:return
         key='personal:'+uid
         if key in self.pending or time.monotonic()<self.retry.get(key,0) or len(self.pending)>=1024:return
         self.pending[key]=('', 'personal',uid);self.pool.submit_personal(key,uid);self.statusChanged.emit()
     def refresh(self,force=False):
         self.last_scan=time.monotonic()
         if not self.enabled:return
-        for channel in ['global',*self.channels]:
+        for channel in self.channels:
             cached=self.store.catalogs.get(channel)
             if not force and cached and time.time()-cached.get('observed_at',0)<600:continue
             uid=self.store.ids.get(channel)
-            if channel=='global':url=API+'/emote-sets/global'
-            elif uid:url=API+'/users/twitch/'+uid
+            if uid:url=API+'/users/twitch/'+uid
             else:continue
             self.request('catalog:'+channel,url,channel,uid or '')
         if force:

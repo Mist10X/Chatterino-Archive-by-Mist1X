@@ -22,10 +22,13 @@ class TrimTests(unittest.TestCase):
         self.app.close();self.app.deleteLater();qt.processEvents();self.tmp.cleanup()
     def create(self):self.dialog=TrimDialog(self.app);self.dialog.show();qt.processEvents();return self.dialog
     def test_preview_and_exclusions_survive_reopen_without_clearing(self):
-        d=self.create();d.choices.item(0).setCheckState(Qt.Checked);d.save_only()
+        d=self.create()
+        for i in range(d.choices.count()):
+            if d.choices.item(i).data(Qt.UserRole)=='one':d.choices.item(i).setCheckState(Qt.Checked)
+        d.save_only()
         self.assertFalse((self.data/'panel-request.txt').exists())
         self.app.theme=Theme(self.data);d=self.create()
-        self.assertEqual(d.excluded(),{'one'});self.assertIn('#one',d.summary.toPlainText());d.submit()
+        self.assertEqual(d.excluded(),{'dangerlyoha','morphe_ya','one'});self.assertIn('#one',d.summary.toPlainText());d.submit()
         body=(self.data/'panel-request.txt').read_text();self.assertIn('exclude\tone\n',body);self.assertNotIn('exclude\ttwo',body)
     def test_all_excluded_disables_clear_and_cancel_does_not_save(self):
         d=self.create()
@@ -39,7 +42,7 @@ class TrimTests(unittest.TestCase):
         atomic_write(self.data/'panel-status.json',json.dumps({'channels':[]}))
         with self.assertRaises(ValueError):TrimDialog(self.app)
     def test_closed_exclusion_is_remembered_and_processing_blocks_second_request(self):
-        self.app.theme.settings['trim_excluded_channels']=['closed'];self.app.theme.save();d=self.create()
+        self.app.control.trim_preserved={'closed'};d=self.create()
         self.assertIn('closed',d.excluded());d.submit();body=(self.data/'panel-request.txt').read_text();self.assertNotIn('exclude\tclosed',body)
         token=self.app.control.pending_request()[1];atomic_write(self.data/'panel-ack.json',json.dumps({'id':token,'status':'processing'}))
         with self.assertRaises(ValueError):self.app.control.request_trim_except(['one','two'],[])

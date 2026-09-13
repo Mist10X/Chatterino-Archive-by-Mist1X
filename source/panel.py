@@ -21,6 +21,7 @@ from twitch_worker import TwitchWorker
 from twitch_dialog import TwitchDialog
 from replay_worker import ReplayWorker
 from replay_view import ReplayView
+from ui_controls import ChannelCombo
 from storage import Control,atomic_write,layout_channels,name
 from message_text import reply_text
 from panel_worker import Worker
@@ -55,6 +56,9 @@ class App(QMainWindow):
         try:self.twitch_config=settings_load(self.data/'twitch')
         except (ValueError,OSError):self.twitch_config={'enabled':False,'channels':[],'tray':True}
         self.twitch=TwitchWorker(self.data,self.twitch_config)
+        from profiles import Profiles
+        self.profiles=Profiles(self.data,lambda:(self.twitch.account or {}).get('access_token'),self.network,self)
+        self.profiles.changed.connect(self.refresh_profiles)
         from moderation_events import ModerationEvents
         self.moderation_events=ModerationEvents(self.twitch)
         from shared_bans import SharedService
@@ -74,6 +78,7 @@ class App(QMainWindow):
         self.build()
         from responsive import Responsive
         self.responsive=Responsive(self)
+        for picker in (self.channel,self.mod_view.channel,self.user_view.channel):picker.bind_profiles(self.profiles)
         from connection_alerts import ConnectionAlerts
         self.connection_alerts=ConnectionAlerts(self);self.context_requested=set()
         from update_ui import Updates
@@ -93,6 +98,15 @@ class App(QMainWindow):
         QShortcut(QKeySequence('Ctrl+F'),self,activated=self.responsive.focus_search)
         QShortcut(QKeySequence('F5'),self,activated=self.reload_all)
         QApplication.instance().focusChanged.connect(self.keep_focus_visible)
+    def refresh_profiles(self,*_):
+        if not hasattr(self,'mod_view'):return
+        if self.selected:
+            self.user_title.setText(self.profiles.display(self.selected));self.avatar.set_profile(self.profiles,self.selected)
+        if self.mod_view.user:
+            self.mod_view.title.setText('@'+self.profiles.display(self.mod_view.user));self.mod_view.avatar.set_profile(self.profiles,self.mod_view.user)
+        if self.user_view.user:
+            self.user_view.title.setText('@'+self.profiles.display(self.user_view.user));self.user_view.avatar.set_profile(self.profiles,self.user_view.user)
+        for tree in (self.users,self.mod_view.people,self.messages,self.mod_view.tree,self.user_view.tree,self.replay_view.list):tree.viewport().update()
     def keep_focus_visible(self,old,current):
         if current is None or self.closing:return
         page=self.pages.currentWidget()
@@ -104,18 +118,20 @@ class App(QMainWindow):
         d=Dialog(self,title,text);d.actions(self.theme,cancel=False);d.exec()
     def build(self):
         central,outer=box();outer.setSpacing(0);self.setCentralWidget(central)
-        header,hl=box(margins=15);hl.setSpacing(8)
+        header,hl=box(margins=15);self.header=header;hl.setSpacing(8)
         top,tl=box(False);tl.addWidget(Avatar(logo=True));heading,ll=box();ll.setSpacing(3)
         self.app_heading=label(APP_NAME,21,bold=True);ll.addWidget(self.app_heading);ll.addWidget(label('Сообщения / Пользователи / История',9,True));tl.addWidget(heading,1)
         hl.addWidget(top)
         tools=QWidget();self.tools_layout=QGridLayout(tools);self.tools_layout.setContentsMargins(0,0,0,0);self.tools_layout.setSpacing(7)
-        self.tool_buttons=[Button('Каналы',self.theme,lambda:self.safe(self.channels_dialog),icon='users'),
-            Button('Папка',self.theme,lambda:self.safe(lambda:os.startfile(str(self.data))),icon='folder'),
-            Button('Оформление',self.theme,self.appearance_dialog,icon='spark')]
+        self.folder_tool=Button('Папка',self.theme,lambda:self.safe(lambda:os.startfile(str(self.data))),icon='folder')
+        self.appearance_tool=Button('Оформление',self.theme,self.appearance_dialog,icon='spark')
         self.trim=Button('Очистить историю чатов…',self.theme,lambda:self.safe(self.trim_dialog),icon='archive',primary=True)
-        self.tool_buttons.append(Button('Twitch',self.theme,self.twitch_dialog,icon='play'));self.tool_buttons.append(self.trim);self.tool_columns=0;self.arrange_tools();hl.addWidget(tools)
+        self.tool_buttons=[Button('Каналы',self.theme,lambda:self.safe(self.channels_dialog),icon='users'),
+            Button('Twitch',self.theme,self.twitch_dialog,icon='play'),self.trim,
+            Button('Ещё',self.theme,self.open_tools_menu)]
+        self.tool_columns=0;self.arrange_tools();hl.addWidget(tools)
         outer.addWidget(header)
-        tabs,tablayout=box(False,margins=12);tablayout.setContentsMargins(16,0,16,8)
+        tabs,tablayout=box(False,margins=12);self.tabs_bar=tabs;tablayout.setContentsMargins(16,0,16,8)
         self.message_tab=Button('Сообщения',self.theme,lambda:self.select_page(0),icon='archive')
         self.moderation_tab=Button('Модерация',self.theme,lambda:self.select_page(1),icon='shield')
         self.replay_tab=Button('Повторы чата',self.theme,lambda:self.select_page(2),icon='play')
@@ -129,13 +145,21 @@ class App(QMainWindow):
         self.twitch_status=label('Twitch не подключён',9,True);fl.addWidget(self.status);fl.addWidget(self.twitch_status);fl.addWidget(self.emote_status);fl.addWidget(self.detail);outer.addWidget(footer)
         self.select_page(0)
     def arrange_tools(self):
-        columns=5 if self.width()>=1100 else (3 if self.width()>=820 else 2)
+        columns=4 if self.width()>=820 else 2
         if columns==self.tool_columns:return
         for b in self.tool_buttons:self.tools_layout.removeWidget(b)
         for i in range(5):self.tools_layout.setColumnStretch(i,0)
         for i,b in enumerate(self.tool_buttons):self.tools_layout.addWidget(b,i//columns,i%columns)
         for i in range(columns):self.tools_layout.setColumnStretch(i,1)
         self.tool_columns=columns
+    def open_tools_menu(self,anchor=None):
+        menu=QMenu(self)
+        menu.addAction('Открыть папку архива',self.folder_tool.click)
+        menu.addAction('Оформление и 7TV',self.appearance_tool.click)
+        menu.addAction('Проверить обновления',self.updates.dialog)
+        menu.addAction('О программе',self.about_dialog)
+        anchor=anchor or self.tool_buttons[-1]
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
     def resizeEvent(self,event):
         if hasattr(self,'tool_buttons'):self.arrange_tools()
         super().resizeEvent(event)
@@ -144,6 +168,7 @@ class App(QMainWindow):
         for i,b in enumerate((self.message_tab,self.moderation_tab,self.replay_tab,self.user_tab)):b.active=i==index;b.update()
         if index==1:self.mod_view.request()
         if index==3:self.user_view.request()
+        if hasattr(self,'responsive'):self.responsive.refresh()
     def message_page(self):
         body,layout=box(False,margins=16);body.setMinimumSize(1000,620)
         sidebar,sl=card();sidebar.setFixedWidth(250);sl.addWidget(label('ОТСЛЕЖИВАЕМЫЕ',9,True,True))
@@ -160,7 +185,7 @@ class App(QMainWindow):
         self.history_button=Button('История модерации',self.theme,self.open_moderation,icon='shield')
         for b in (self.toggle,self.remove,self.history_button):al.addWidget(b);b.setEnabled(False)
         al.addStretch();hl.addWidget(actions);rl.addWidget(heading)
-        filters,fl=box(False);self.channel=combo(['Все каналы']);self.channel.setAccessibleName('Канал сохранённых сообщений')
+        filters,fl=box(False);self.channel=ChannelCombo(['Все каналы']);self.channel.setAccessibleName('Канал сохранённых сообщений')
         self.search=QLineEdit();self.search.setPlaceholderText('Поиск в сообщениях…');self.search.setAccessibleName('Поиск в сообщениях')
         self.day=QLineEdit();self.day.setPlaceholderText('ГГГГ-ММ-ДД');self.day.setFixedWidth(155);self.day.setAccessibleName('Дата сообщений')
         fl.addWidget(self.channel);fl.addWidget(self.search,1);fl.addWidget(self.day);rl.addWidget(filters)
@@ -194,7 +219,7 @@ class App(QMainWindow):
         if not items:return
         user=items[0].data(0,Qt.UserRole)
         if user!=self.selected:
-            self.selected=user;self.user_title.setText(user);self.avatar.text=user[:2];self.avatar.update()
+            self.selected=user;self.user_title.setText(self.profiles.display(user));self.avatar.set_profile(self.profiles,user)
             for b in (self.toggle,self.remove,self.history_button):b.setEnabled(True)
             self.messages.clear();self.preview.setPlainText('Выбери сообщение, чтобы прочитать его целиком.');self.reload()
         self.update_recording()
@@ -226,7 +251,7 @@ class App(QMainWindow):
         self.messages.clear();self.refresh_users()
         if self.control.users:self.choose_user(sorted(self.control.users)[0])
         else:
-            self.user_title.setText('Сохранённые сообщения');self.avatar.text='';self.avatar.update()
+            self.user_title.setText('Сохранённые сообщения');self.avatar.set_profile(self.profiles,'')
             self.recording.setText('Добавь пользователя, чтобы начать запись');self.counter.setText('В списке пока нет пользователей')
             for b in (self.toggle,self.remove,self.history_button,self.prev,self.next):b.setEnabled(False)
             self.preview.setPlainText('Архив сохранён. Чтобы снова открыть его, добавь прежний ник.')
@@ -382,6 +407,24 @@ class App(QMainWindow):
         TrimDialog(self).exec()
     def poll(self):
         try:
+            request=self.data/'panel-exit-request.json'
+            if request.exists():
+                try:
+                    value=json.loads(request.read_text(encoding='utf-8'))
+                    fresh=value.get('action')=='exit' and abs(time.time()-float(value.get('requested_at',0)))<30
+                except (OSError,ValueError,TypeError,AttributeError):fresh=False
+                try:request.unlink()
+                except OSError:pass
+                if fresh:self.exit_app();return
+            request=self.data/'panel-show-request.json'
+            if request.exists():
+                try:
+                    value=json.loads(request.read_text(encoding='utf-8'))
+                    fresh=value.get('action')=='show' and abs(time.time()-float(value.get('requested_at',0)))<30
+                except (OSError,ValueError,TypeError,AttributeError):fresh=False
+                try:request.unlink()
+                except OSError:pass
+                if fresh:self.restore_window()
             changed=False
             while True:
                 try:task,payload=self.worker.results.get_nowait()
@@ -453,7 +496,7 @@ class App(QMainWindow):
         self.tray.activated.connect(lambda reason:self.restore_window() if reason in (QSystemTrayIcon.Trigger,QSystemTrayIcon.DoubleClick) else None)
         self.tray.show()
     def restore_window(self):
-        self.showNormal();self.raise_();self.activateWindow()
+        self.setVisible(True);self.showNormal();self.raise_();self.activateWindow()
     def exit_app(self):
         self.exit_requested=True;self.close()
     def closeEvent(self,event):
@@ -469,7 +512,7 @@ class App(QMainWindow):
             if getattr(self,'shared_window',None):self.shared_window.close()
         self.twitch.stopped.set()
         if not self.twitch.is_alive():self.replays.stopped.set()
-        self.emotes.close()
+        self.emotes.close();self.profiles.close()
         if self.worker.is_alive() or self.twitch.is_alive() or self.replays.is_alive() or self.shared.is_alive():
             self.worker.stopped.set()
             if not self.closing:self.closing=True;self.timer.stop();self.status.setText('Завершаем работу с архивом…')
@@ -525,14 +568,23 @@ def main():
         if os.name=='nt':
             import msvcrt
             try:msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
-            except OSError:raise ValueError('Панель для этого архива уже открыта. Найди её на панели задач или в трее Windows (значки возле часов).') from None
+            except OSError:
+                request=data/'panel-show-request.json'
+                atomic_write(request,json.dumps({'action':'show','requested_at':time.time()}))
+                deadline=time.monotonic()+2
+                while request.exists() and time.monotonic()<deadline:time.sleep(.05)
+                if request.exists():
+                    try:request.unlink()
+                    except OSError:pass
+                    raise ValueError('Архив уже запущен, но не ответил на запрос показа окна. Заверши его через диспетчер задач и открой снова.') from None
+                return 0
         window=App(profile,args.demo,network=not args.smoke_test)
         if args.secondary_screen:
             screens=[screen for screen in app.screens() if screen!=app.primaryScreen()]
             if screens:
                 area=screens[0].availableGeometry();window.resize(min(window.width(),area.width()-40),min(window.height(),area.height()-60))
                 window.move(area.x()+20,area.y()+30)
-        window.show()
+        window.show();QTimer.singleShot(0,window.restore_window)
         if args.update_health and args.update_nonce:
             from update_apply import confirm_health
             QTimer.singleShot(6000,lambda:confirm_health(data,args.update_health,args.update_nonce,window))

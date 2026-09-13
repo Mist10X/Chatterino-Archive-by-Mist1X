@@ -1,3 +1,4 @@
+from ui_controls import ChannelCombo
 """Chat-only replay window and a separate recordings library."""
 import datetime as dt
 import hashlib
@@ -103,7 +104,7 @@ class ChatBrowser(EmoteBrowser):
         dim=row.get('seq') in dimmed;normal='#85818e' if dim else '#eeedf5'
         def text(value,color=normal,bold=False,small=False):
             fmt=QTextCharFormat();f=QFont(self.font());f.setWeight(QFont.DemiBold if bold or not small else QFont.Normal)
-            if small:f.setPointSizeF(9)
+            if small:f.setPointSizeF(10)
             fmt.setFont(f);fmt.setForeground(QColor(color));cursor.insertText(value,fmt)
         def parts(value,refs,height=27):
             for part in groups(value,refs):
@@ -293,11 +294,11 @@ class ReplayView:
         body,layout=box(margins=16);body.setMinimumWidth(760)
         header,hl=card();hl.addWidget(label('Повторы чата',20,bold=True))
         hl.addWidget(label('Выбери каналы для полной записи во время эфиров. Сохранённый чат можно листать или воспроизводить.',10,True))
-        row,rl=box(False);self.channel=combo(self.service.config['channels']);rl.addWidget(self.channel,1)
+        row,rl=box(False);self.channel=ChannelCombo(self.service.config['channels']);self.channel.bind_profiles(app.profiles);rl.addWidget(self.channel,1)
         rl.addWidget(Button('Добавить канал',app.theme,self.add,icon='plus'));rl.addWidget(Button('Убрать канал',app.theme,self.remove,icon='trash'));hl.addWidget(row)
         self.enabled=QCheckBox('Записывать чат во время стримов');self.enabled.setChecked(self.service.config['enabled']);hl.addWidget(self.enabled)
         self.enabled.toggled.connect(self.configure);self.state=label('',10,True);hl.addWidget(self.state);layout.addWidget(header)
-        self.filter=combo(['Все записанные каналы']);layout.addWidget(self.filter);self.filter.currentIndexChanged.connect(self.refresh)
+        self.filter=ChannelCombo(['Все записанные каналы']);self.filter.bind_profiles(app.profiles);layout.addWidget(self.filter);self.filter.currentIndexChanged.connect(self.refresh)
         self.list=table(['Дата','Канал','Стрим','Сообщений','Размер'],[180,145,310,110,100]);self.list.header().setStretchLastSection(False);self.list.header().setSectionResizeMode(2,QHeaderView.Stretch);layout.addWidget(self.list,1)
         actions,al=box(False);al.addWidget(Button('Открыть повтор',app.theme,self.open,icon='play',primary=True));al.addWidget(Button('Удалить запись',app.theme,self.delete,icon='trash',danger=True));layout.addWidget(actions)
         self.list.itemDoubleClicked.connect(lambda *_:self.open());self.frame=scroll(body)

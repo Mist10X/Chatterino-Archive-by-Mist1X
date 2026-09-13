@@ -36,6 +36,14 @@ class ModerationTests(unittest.TestCase):
         self.assertTrue(result['rows'][0]['active'])
         self.assertFalse(result['rows'][1]['active'])
 
+    def test_same_source_duplicate_bans_and_timeouts_are_one_punishment(self):
+        self.add(self.event(),self.event(at=self.at+83))
+        self.add(self.event('timeout',self.at+5000,duration=600),
+                 self.event('timeout',self.at+5082,duration=600))
+        result=self.index.query()
+        self.assertEqual(result['bans'],1)
+        self.assertEqual(result['timeouts'],1)
+
     def test_speech_only_resolves_older_punishment_in_same_channel(self):
         self.add(self.event(),self.event('speech',self.at-1),self.event('speech',self.at+1,channel='dangerlyoha'))
         self.assertTrue(self.index.query()['rows'][0]['active'])

@@ -69,7 +69,15 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(c.users, restored.users)
         self.assertEqual(c.channels, restored.channels)
         self.assertEqual(restored.keep, 1000)
+        self.assertTrue(restored.auto_trim);self.assertEqual(restored.auto_trim_interval,3600)
+        self.assertEqual(restored.trim_preserved,{'dangerlyoha','morphe_ya'})
         self.assertEqual(self.path.with_suffix('.state').read_text(), 'on\noff\non\n')
+
+    def test_auto_trim_configuration_roundtrip(self):
+        c=Control(self.data);c.auto_trim=False;c.auto_trim_interval=7200;c.auto_trim_keep=250
+        c.trim_preserved={'one','morphe_ya'};c.save();restored=Control(self.data)
+        self.assertFalse(restored.auto_trim);self.assertEqual(restored.auto_trim_interval,7200)
+        self.assertEqual(restored.auto_trim_keep,250);self.assertEqual(restored.trim_preserved,{'one','morphe_ya'})
 
     def test_invalid_config_and_path_traversal(self):
         for value in ['../../foo', 'C:\\test', 'a\nb', 'a\ton', '', 'а']:

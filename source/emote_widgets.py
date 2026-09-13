@@ -1,7 +1,8 @@
 """Inline static/animated emotes in Qt text documents and message table cells."""
-from PySide6.QtCore import QObject,Qt,QSize,QSizeF,QRectF,QPointF,QEvent
+import re
+from PySide6.QtCore import QUrl,QRect, QObject,Qt,QSize,QSizeF,QRectF,QPointF,QEvent
 from PySide6.QtGui import (QPyTextObject,QTextFormat,QTextCharFormat,QTextBlockFormat,
-    QTextCursor,QFont,QFontMetricsF,QColor,QKeySequence,QPalette,QPainter)
+    QTextDocument,QTextImageFormat,QPixmap,QPainterPath,QTextCursor,QFont,QFontMetricsF,QColor,QKeySequence,QPalette,QPainter)
 from PySide6.QtWidgets import QTextBrowser,QStyledItemDelegate,QStyleOptionViewItem,QStyle,QMenu,QToolTip
 from seven_tv_store import groups
 
@@ -50,7 +51,7 @@ class EmoteObject(QPyTextObject):
 
 class EmoteBrowser(QTextBrowser):
     def __init__(self,manager,parent=None):
-        super().__init__(parent);self.manager=manager;self.blocks=None;self.signature=None;self.asset_keys=set()
+        super().__init__(parent);self.manager=manager;self.blocks=None;self.signature=None;self.asset_keys=set();self.profile_source=None;self.profile_keys=set()
         self.handler=EmoteObject(manager,self);self.document().documentLayout().registerHandler(OBJECT,self.handler)
         self.setOpenExternalLinks(False);self.setOpenLinks(False);self.setMinimumHeight(115)
         self.viewport().setMouseTracking(True)
@@ -60,13 +61,35 @@ class EmoteBrowser(QTextBrowser):
     def set_blocks(self,blocks):
         if self.blocks==blocks:return
         self.blocks=blocks;self.signature=None;self.refresh_emotes()
+    def profile_changed(self,login):
+        if login in self.profile_keys:self.signature=None;self.refresh_emotes()
+    def insert_metadata(self,cursor,text,fmt):
+        profiles=self.profile_source
+        if not profiles:cursor.insertText(text,fmt);return
+        text=re.sub(r'@([A-Za-z0-9_]{1,25})',lambda m:'@'+profiles.display(m[1]),text)
+        for part in re.split(r'(#[A-Za-z0-9_]{1,25}\b)',text):
+            if not part.startswith('#') or not profiles.valid(part[1:]):cursor.insertText(part,fmt);continue
+            login=part[1:].lower();self.profile_keys.add(login);profiles.ensure(login)
+            image=QPixmap(24,24);image.fill(Qt.transparent);p=QPainter(image);p.setRenderHint(QPainter.Antialiasing)
+            if not profiles.paint(p,QRectF(0,0,24,24),login):
+                p.setBrush(QColor('#544262'));p.setPen(Qt.NoPen);p.drawEllipse(QRectF(0,0,24,24));p.setPen(QColor('#eeedf5'));p.setFont(self.font());p.drawText(QRect(0,0,24,24),Qt.AlignCenter,login[0].upper())
+            p.end();url=QUrl('profile:'+login);self.document().addResource(QTextDocument.ImageResource,url,image)
+            picture=QTextImageFormat();picture.setName(url.toString());picture.setWidth(18);picture.setHeight(18);picture.setVerticalAlignment(QTextCharFormat.AlignMiddle)
+            cursor.insertImage(picture);cursor.insertText(' | '+profiles.display(login),fmt)
     def refresh_emotes(self):
         if self.blocks is None:return
+        if self.profile_source is None:
+            self.profile_source=getattr(self.window(),'profiles',None)
+            if self.profile_source:self.profile_source.changed.connect(self.profile_changed)
+        self.profile_keys=set()
         resolved=[];self.asset_keys=set()
         for block in self.blocks:
             row=block.get('row')
             refs=self.manager.bind(row,block.get('slot','body')) if row is not None else {}
-            resolved.append((block,groups(block.get('text',''),refs)))
+            text=block.get('text','')
+            if self.profile_source and block.get('identity'):
+                login=block['identity'];self.profile_keys.add(login);self.profile_source.ensure(login);text=text.replace(block.get('display_identity') or login,self.profile_source.display(login,block.get('display_identity')))
+            resolved.append((block,groups(text,refs)))
             self.asset_keys.update(r['key'] for r in refs.values())
         # Asset arrival changes object sizes, while original text and selection stay stable.
         signature=str(resolved)
@@ -78,9 +101,11 @@ class EmoteBrowser(QTextBrowser):
             if i:cursor.insertBlock()
             style=block.get('style','body');bf=QTextBlockFormat();bf.setTopMargin(4);bf.setBottomMargin(8)
             if style=='quote':bf.setLeftMargin(12);bf.setRightMargin(6);bf.setBackground(QColor('#262030'))
+            if style=='reward_notice':bf.setBackground(QColor('#30253f'));bf.setTopMargin(12);bf.setBottomMargin(10)
             cursor.setBlockFormat(bf)
             fmt=QTextCharFormat();font=QFont(self.font());font.setPointSizeF(10 if style in ('meta','quote') else 11)
             if style in ('title','deletion'):font.setWeight(QFont.DemiBold)
+            if style=='reward_notice':font.setPointSizeF(12);font.setWeight(QFont.Bold)
             fmt.setFont(font);fmt.setForeground(QColor('#b7a9c9' if style in ('meta','quote') else '#eeedf5'))
             if style=='deletion':fmt.setForeground(QColor('#e9ac7a'))
             for part in parts:
@@ -88,7 +113,9 @@ class EmoteBrowser(QTextBrowser):
                     object_format=QTextCharFormat(fmt);object_format.setObjectType(OBJECT);object_format.setProperty(GROUP,part);object_format.setProperty(HEIGHT,25 if style=='quote' else 30)
                     import html
                     object_format.setToolTip('<qt>'+html.escape(part['text'])+'</qt>');cursor.insertText('\ufffc',object_format)
-                else:cursor.insertText(part['text'],fmt)
+                else:
+                    if style in ('meta','title','deletion'):self.insert_metadata(cursor,part['text'],fmt)
+                    else:cursor.insertText(part['text'],fmt)
         maximum=self.document().characterCount()-1
         cursor.setPosition(min(selection[0],maximum));cursor.setPosition(min(selection[1],maximum),QTextCursor.KeepAnchor);self.setTextCursor(cursor);self.verticalScrollBar().setValue(scroll)
     def frame_changed(self,key):
@@ -173,13 +200,13 @@ class EmoteDelegate(QStyledItemDelegate):
         painter.restore()
 
 def message_blocks(row,local_time):
-    result=[{'text':f"{local_time(row['time_utc'])}  ·  #{row['channel']}  ·  {row.get('display_name') or row.get('user','')}",'style':'meta'}]
+    result=[{'text':f"{local_time(row['time_utc'])}  ·  #{row['channel']}  ·  {row.get('display_name') or row.get('user','')}",'style':'meta','identity':row.get('user',''),'display_identity':row.get('display_name') or row.get('user','')}]
     reply=row.get('reply')
     if reply:
         author=reply.get('display_name') or reply.get('user') or 'неизвестный автор'
         if reply.get('state')=='available':
             quoted=dict(reply);quoted['id']=row.get('id','');quoted['time_utc']=row.get('time_utc','');quoted['channel']=row['channel']
-            result.append({'text':'↳ Исходное сообщение · '+author,'style':'meta'})
+            result.append({'text':'→ Исходное сообщение · '+author,'style':'meta'})
             result.append({'text':reply.get('text',''),'style':'quote','row':quoted,'slot':'reply'})
-        else:result.append({'text':'↳ Исходное сообщение недоступно','style':'quote'})
+        else:result.append({'text':'→ Исходное сообщение недоступно','style':'quote'})
     result.append({'text':row['text'],'row':row});return result

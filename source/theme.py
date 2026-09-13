@@ -31,8 +31,9 @@ class Theme:
 def install_style(app):
     for path in Path(__file__).with_name('fonts').glob('*.ttf'):
         QFontDatabase.addApplicationFont(str(path))
-    font=QFont('Archive Montserrat');font.setPointSizeF(10.5)
-    font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    font=QFontDatabase.font('Archive Montserrat','SemiBold',10);font.setPointSizeF(10.5)
+    font.setWeight(QFont.DemiBold)
+    font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font);app.setStyle('Fusion')
     palette=QPalette()
@@ -43,7 +44,7 @@ def install_style(app):
         palette.setColor(role,QColor(color))
     app.setPalette(palette)
     app.setStyleSheet('''
-        QWidget {color:#eeedf5;} QMainWindow,QDialog {background:#0e0e11;}
+        QWidget {color:#eeedf5;font-family:"Archive Montserrat";font-weight:600;} QMainWindow,QDialog {background:#0e0e11;}
         QLabel {background:transparent;} QLabel[muted="true"] {color:#a09bab;}
         QFrame[card="true"] {background:#17171e;border:1px solid #34323f;border-radius:14px;}
         QLineEdit,QComboBox {background:#202029;border:1px solid #3b3848;border-radius:9px;padding:9px 11px;selection-background-color:#57406e;min-height:20px;}
@@ -52,8 +53,8 @@ def install_style(app):
         QComboBox::drop-down {width:24px;border:0;}
         QComboBox QAbstractItemView {background:#23212c;selection-background-color:#423153;border:1px solid #55465f;padding:6px;}
         QTreeWidget,QListWidget {font-family:"Archive Montserrat";font-size:11pt;font-weight:600;background:#17171e;alternate-background-color:#1b1b23;border:1px solid #34323f;border-radius:11px;outline:0;padding:5px;selection-background-color:#3d2c50;}
-        QListWidget::item {padding:9px 6px;}
-        QTreeWidget::item {padding:9px 6px;border:0;}
+        QListWidget::item {padding:7px 6px;}
+        QTreeWidget::item {padding:7px 6px;border:0;}
         QTreeWidget::item:hover {background:#2d263b;}
         QTreeWidget::item:selected {background:#423153;color:#f6efff;}
         QHeaderView::section {background:#202029;color:#b9b1c9;padding:10px 8px;border:0;border-bottom:1px solid #34323f;font-weight:600;}
@@ -66,6 +67,8 @@ def install_style(app):
         QScrollBar::handle:hover {background:#9074ad;}
         QScrollBar::add-line,QScrollBar::sub-line {width:0;height:0;}
         QScrollBar::add-page,QScrollBar::sub-page {background:transparent;}
+        QMenu {font-size:10.5pt;background:#202029;border:1px solid #55465f;padding:6px;} QMenu::item {padding:9px 16px;} QMenu::item:selected {background:#423153;} QMenu::separator {height:1px;background:#34323f;margin:5px;}
+        QAbstractItemView[completionPopup="true"] {font-size:10.5pt;background:#202029;border:1px solid #55465f;selection-background-color:#423153;padding:4px;} QAbstractItemView[completionPopup="true"]::item {padding:8px 10px;min-height:24px;}
         QToolTip {background:#26212f;color:#eeedf5;border:1px solid #766087;padding:7px;border-radius:6px;}
     ''')
 
@@ -152,10 +155,14 @@ class Button(QAbstractButton):
 
 class Avatar(QWidget):
     def __init__(self,text='',logo=False):
-        super().__init__();self.text=text;self.logo=logo;self.setFixedSize(48,48)
+        super().__init__();self.text=text;self.logo=logo;self.profiles=None;self.login='';self.setFixedSize(48,48)
+    def set_profile(self,profiles,login):
+        self.profiles=profiles;self.login=login or '';self.text=self.login[:2];profiles.ensure(self.login);self.update()
     def paintEvent(self,e):
         p=QPainter(self);p.setRenderHints(QPainter.Antialiasing|QPainter.TextAntialiasing)
         p.setPen(QPen(QColor('#806398'),1));p.setBrush(QColor('#34243f'));p.drawEllipse(QRectF(3,3,42,42))
+        if self.profiles and self.login and self.profiles.paint(p,QRectF(3,3,42,42),self.login):
+            p.end();return
         if self.logo:draw_icon(p,'archive',QRectF(13,13,22,22),ACCENT)
         else:
             f=QFont(self.font());f.setPointSizeF(13);f.setWeight(QFont.DemiBold);p.setFont(f);p.setPen(QColor(ACCENT));p.drawText(self.rect(),Qt.AlignCenter,self.text[:2].upper())
@@ -164,7 +171,9 @@ class Avatar(QWidget):
 def label(text='',size=None,muted=False,bold=False):
     w=QLabel(text);w.setTextFormat(Qt.PlainText);w.setProperty('muted',muted);w.setWordWrap(True)
     f=QFont(w.font())
-    if size:f.setPointSizeF(size)
+    if size:
+        size=max(10,size);f.setPointSizeF(size)
+        w.setStyleSheet(f"font-size:{size}pt;")
     if bold:f.setWeight(QFont.DemiBold)
     w.setFont(f);return w
 
@@ -184,6 +193,7 @@ def update_combo(w,values):
     w.blockSignals(True);w.clear();w.addItems(values)
     if current in values:w.setCurrentText(current)
     w.blockSignals(False)
+    if hasattr(w,'refresh_icons'):w.refresh_icons()
 
 def table(headers,widths=None):
     from stable_tree import StableTree

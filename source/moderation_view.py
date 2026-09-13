@@ -1,8 +1,9 @@
 """Moderation directory and exact-user cards for the Qt panel."""
 import datetime as dt
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal, QPoint
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QLineEdit, QTreeWidgetItem
+from PySide6.QtWidgets import QLineEdit, QTreeWidgetItem, QMenu, QWidgetAction, QCheckBox, QCompleter, QComboBox
+from ui_controls import ChannelCombo, AnimatedCheck
 from storage import name
 from query_state import QueryState
 from stable_tree import reconcile,set_texts
@@ -13,6 +14,50 @@ from theme import (box,card,label,Button,Avatar,combo,table,preview,scroll,updat
 def stamp(ms):
     try:return dt.datetime.fromtimestamp(ms/1000).strftime('%d.%m.%Y  %H:%M:%S')
     except (ValueError,TypeError,OSError):return 'Время неизвестно'
+
+class EventFilter(Button):
+    changed=Signal()
+    OPTIONS=[('Муты','timeout'),('Баны','ban'),('Удалённые сообщения','delete'),('Размуты','reward_unmute')]
+    def __init__(self,theme):
+        super().__init__('Все события',theme,self.open);self.menu=QMenu(self);self.checks=[];self.updating=False
+        self.all=AnimatedCheck('Все события',theme);self.add_check(self.all);self.all.setChecked(True);self.all.stateChanged.connect(self.toggle_all)
+        self.menu.addSeparator()
+        for label_text,value in self.OPTIONS:
+            check=AnimatedCheck(label_text,theme);check.setProperty('value',value);check.setChecked(True);check.stateChanged.connect(self.item_changed);self.add_check(check);self.checks.append(check)
+    def add_check(self,check):
+        action=QWidgetAction(self.menu);action.setDefaultWidget(check);self.menu.addAction(action)
+    def open(self):self.menu.exec(self.mapToGlobal(QPoint(0,self.height())))
+    def toggle_all(self,state):
+        if self.updating:return
+        self.updating=True
+        for check in self.checks:check.setChecked(bool(state))
+        self.updating=False;self.refresh();self.changed.emit()
+    def item_changed(self):
+        if self.updating:return
+        self.updating=True;self.all.setChecked(all(c.isChecked() for c in self.checks));self.updating=False
+        self.refresh();self.changed.emit()
+    def refresh(self):
+        selected=[c.text() for c in self.checks if c.isChecked()]
+        self.setToolTip(', '.join(selected) if selected else 'Выбери хотя бы один тип события для просмотра.')
+        caption=', '.join(selected)
+        self.setText('Все события' if len(selected)==len(self.checks) else ('События не выбраны' if not selected else caption if len(caption)<=25 else 'Выбрано: '+str(len(selected))))
+    def values(self):return tuple(c.property('value') for c in self.checks if c.isChecked())
+    def currentText(self):return self.text()
+    def count(self):return len(self.OPTIONS)+1
+    def itemText(self,index):return (['Все события']+[x[0] for x in self.OPTIONS])[index]
+    def setCurrentIndex(self,index):self.setCurrentText(self.itemText(index))
+    def setCurrentText(self,text):
+        labels=[x[0] for x in self.OPTIONS]
+        if text!='Все события' and text not in labels:return
+        self.updating=True
+        for check in self.checks:check.setChecked(text=='Все события' or check.text()==text)
+        self.all.setChecked(text=='Все события');self.updating=False;self.refresh();self.changed.emit()
+    def set_values(self,values):
+        values=set(values)
+        self.updating=True
+        for check in self.checks:check.setChecked(check.property('value') in values)
+        self.all.setChecked(all(c.isChecked() for c in self.checks));self.updating=False;self.refresh();self.changed.emit()
+    def reset(self):self.setCurrentText('Все события')
 
 class ModerationView:
     def __init__(self,app):
@@ -32,8 +77,8 @@ class ModerationView:
         dl.addWidget(Button('Все пользователи',app.theme,self.overview,icon='archive'))
         layout.addWidget(directory)
         right,rl=box();layout.addWidget(right,1)
-        heading,hl=card();identity,il=box(False);self.avatar=Avatar();il.addWidget(self.avatar)
-        title,tl=box();self.title=label('Модерация',18,bold=True);tl.addWidget(self.title);tl.addWidget(label('История модерации',9,True));il.addWidget(title,1)
+        heading,hl=card();self.heading=heading;identity,il=box(False);self.heading_identity=identity;self.avatar=Avatar();il.addWidget(self.avatar)
+        title,tl=box();self.title=label('Модерация',18,bold=True);self.subtitle=label('История модерации',9,True);tl.addWidget(self.title);tl.addWidget(self.subtitle);il.addWidget(title,1)
         self.total_caption=label('Всего в архиве:',15,bold=True)
         self.total_caption.setAlignment(Qt.AlignLeft|Qt.AlignTop);il.addWidget(self.total_caption,0,Qt.AlignTop)
         self.ban_count=label('0',19,bold=True);self.ban_count.setStyleSheet('color:#efa0b2;')
@@ -44,12 +89,14 @@ class ModerationView:
         hl.addWidget(identity);rl.addWidget(heading)
         from shared_bans_view import open_shared
         self.shared_button=Button('Общие баны Chatterino+',app.theme,lambda:open_shared(app,self.user or self.search.text().strip()),icon='shield')
-        links,links_layout=box(False);links_layout.addWidget(self.shared_button)
-        links_layout.addWidget(Button('Полная карточка',app.theme,lambda:app.safe(lambda:app.open_user_card(self.user or self.search.text())),icon='users'));hl.addWidget(links)
+        links,links_layout=box(False);self.links=links;links_layout.addWidget(self.shared_button)
+        self.full_card_button=Button('Полная карточка',app.theme,lambda:app.safe(lambda:app.open_user_card(self.user or self.search.text())),icon='users')
+        links_layout.addWidget(self.full_card_button);hl.addWidget(links)
         self.scope=label('Все пользователи · наш архив и общие баны',9,True);rl.addWidget(self.scope)
-        fw,fl=box(False);self.channel=combo(['Все каналы']);self.kind=combo(['Все события','Муты','Баны','Удалённые сообщения'])
+        fw,fl=box(False);self.channel=ChannelCombo(['Все каналы']);self.kind=EventFilter(app.theme)
         self.channel.setAccessibleName('Канал событий модерации');self.kind.setAccessibleName('Тип события модерации')
-        fl.addWidget(self.channel,1);fl.addWidget(self.kind,1);fl.addWidget(Button('Сбросить',app.theme,self.reset));rl.addWidget(fw)
+        self.reset_button=Button('Сбросить',app.theme,self.reset)
+        fl.addWidget(self.channel,1);fl.addWidget(self.kind,1);fl.addWidget(self.reset_button);rl.addWidget(fw)
         self.tree=table(['Время','Пользователь','Канал','Событие','Последнее сообщение'],[175,140,135,135,300]);rl.addWidget(self.tree,3)
         nav,nl=box(False);self.page_label=label('',9,True);nl.addWidget(self.page_label,1)
         self.prev=Button('Новее',app.theme,lambda:self.page(-1),icon='left');self.next=Button('Старее',app.theme,lambda:self.page(1),icon='right')
@@ -59,12 +106,15 @@ class ModerationView:
         self.summary=label('',9,True);self.global_counts=label('',9,True);rl.addWidget(self.summary);rl.addWidget(self.global_counts)
         self.frame=scroll(body)
         self.search.textChanged.connect(self.search_edited);self.search.returnPressed.connect(lambda:app.safe(lambda:self.open_user(self.search.text())))
-        self.channel.currentTextChanged.connect(self.reload);self.kind.currentTextChanged.connect(self.reload)
+        self.channel.currentIndexChanged.connect(self.reload);self.kind.changed.connect(self.reload)
         self.people.itemSelectionChanged.connect(self.select_person);self.tree.itemSelectionChanged.connect(self.show)
         self.tree.itemDoubleClicked.connect(lambda item,col:self.open_user(item.data(0,Qt.UserRole)['user']) if item.data(0,Qt.UserRole)['user'] else None)
         self.preview.setPlainText('Выбери событие, чтобы увидеть историю наказания и предшествующие сообщения.')
 
-    def filters(self):return self.user,'' if self.channel.currentText()=='Все каналы' else self.channel.currentText(),{'Все события':'','Баны':'ban','Муты':'timeout','Удалённые сообщения':'delete'}[self.kind.currentText()]
+    def selected_channel(self):
+        text=self.channel.currentText()
+        return '' if text=='Все каналы' or self.channel.findText(text,Qt.MatchFixedString)<0 else text
+    def filters(self):return self.user,self.selected_channel(),self.kind.values()
     def search_edited(self):
         self.people_limit=200
         self.query.invalidate();self.timer.start()
@@ -84,7 +134,7 @@ class ModerationView:
             self.card_key=(filters,self.offset)
             self.rows=[];self.total=0;self.tree.clear();self.page_label.setText('Загружаем историю…')
             self.prev.setEnabled(False);self.next.setEnabled(False)
-            self.title.setText('@'+self.user if self.user else 'Модерация')
+            self.title.setText('@'+self.app.profiles.display(self.user) if self.user else 'Модерация');self.avatar.set_profile(self.app.profiles,self.user)
             self.total_caption.setText('У пользователя:' if self.user else 'Всего в архиве:')
             for counter in (self.ban_count,self.mute_count,self.delete_count):counter.setText('…')
             self.preview.setPlainText('Загружаем историю…')
@@ -93,12 +143,13 @@ class ModerationView:
         self.token=token;self.app.worker.tasks.put(('moderation',(token,filters,self.offset,search,extra,self.people_limit)))
     def reload(self,*_):
         self.timer.stop();self.offset=0
-        deleted=self.kind.currentText()=='Удалённые сообщения'
+        deleted=self.kind.values()==('delete',)
         self.tree.setMaximumHeight(210 if deleted else 16777215)
         self.preview_caption.setText('УДАЛЁННОЕ СООБЩЕНИЕ' if deleted else 'СОБЫТИЕ И СООБЩЕНИЯ ПЕРЕД НИМ')
+        if hasattr(self.app,'responsive'):self.app.responsive.refresh()
         self.request()
     def reset(self):
-        for w in (self.channel,self.kind):w.blockSignals(True);w.setCurrentIndex(0);w.blockSignals(False)
+        self.channel.blockSignals(True);self.channel.setCurrentIndex(0);self.channel.blockSignals(False);self.kind.reset()
         self.reload()
     def overview(self):self.user='';self.search.blockSignals(True);self.search.clear();self.search.blockSignals(False);self.reset()
     def open_user(self,user):
@@ -117,18 +168,18 @@ class ModerationView:
         if not self.query.finish(token):return
         self.rows=result['rows'];self.total=result['total']
         def update_event(item,row):
-            from user_history import event_summary,event_table_summary
-            kind={'ban':'Бан','timeout':'Мут','delete':'Удаление'}[row['kind']]
-            if row['kind']=='timeout' and row['duration'] is not None:kind+=f" · {row['duration']} с"
+            from user_history import event_summary,event_table_summary,event_kind_label
+            kind=event_kind_label(row)
             summary=event_table_summary(row);row['summary']=summary
             set_texts(item,[stamp(row['at_ms']),row['user'] or 'Автор неизвестен','#'+row['channel'],kind,summary]);item.setData(0,Qt.UserRole,row)
             item.setToolTip(4,event_table_summary(row,2000))
             from responsive import format_moderation
             format_moderation(self,item,row,kind)
-            item.setForeground(3,QColor(RED if row['kind']=='ban' else ('#e9ac7a' if row['kind']=='delete' else '#e7c685')));item.setForeground(4,QColor('#e7c685' if summary.startswith('AutoMod ·') else '#eeedf5'))
+            from responsive import event_color,summary_color
+            item.setForeground(3,QColor(event_color(row)));item.setForeground(4,QColor(summary_color(row,summary)))
         reconcile(self.tree,self.rows,lambda row:row['key'],update_event,follow_top=self.offset==0)
         self.tree.setColumnHidden(1,bool(self.user))
-        self.title.setText('@'+self.user if self.user else 'Модерация');self.avatar.text=self.user[:2] if self.user else 'ВС';self.avatar.update()
+        self.title.setText('@'+self.app.profiles.display(self.user) if self.user else 'Модерация');self.avatar.set_profile(self.app.profiles,self.user);self.avatar.text=self.user[:2] if self.user else 'ВС';self.avatar.update()
         self.total_caption.setText('У пользователя:' if self.user else 'Всего в архиве:')
         personal=result['personal_counts'];overall=result['global_counts']
         self.ban_count.setText(str(personal['bans']));self.mute_count.setText(str(personal['timeouts']));self.delete_count.setText(str(personal.get('deletions',0)))
@@ -144,7 +195,7 @@ class ModerationView:
         self.prev.setEnabled(self.offset>0);self.next.setEnabled(self.offset+len(self.rows)<self.total)
         update_combo(self.channel,['Все каналы']+sorted(set(result['channels'])|set(self.app.control.channels)))
         if hasattr(self.app,'responsive'):self.app.responsive.columns()
-        note=f"В выбранном канале и типе: баны — {result['bans']}, муты — {result['timeouts']}, удаления — {result.get('deletions',0)}."
+        note=f"По выбранным условиям: баны — {result['bans']}, муты — {result['timeouts']}, удаления — {result.get('deletions',0)}, баны после AutoMod — {result.get('automod',0)}, размуты — {result.get('unmutes',0)}."
         hint=result.get('hint')
         if hint:
             date=dt.datetime.fromtimestamp(hint['at_seconds']).strftime('%d.%m.%Y %H:%M')
@@ -153,6 +204,7 @@ class ModerationView:
         self.summary.setText(note)
         if self.tree.selectedItems():self.show()
         else:self.preview.setPlainText('Выбери событие, чтобы увидеть сообщения перед наказанием.' if self.rows else 'Событий по этим условиям пока нет. Удаления поступают из подключения Twitch, баны и муты — из Chatterino.')
+        if not self.kind.values():self.preview.setPlainText('Выбери типы событий в фильтре над списком.');self.page_label.setText('Типы событий не выбраны')
         if self.query.dirty:self.request()
     def show(self):
         selected=self.tree.selectedItems()
@@ -160,6 +212,9 @@ class ModerationView:
         row=selected[0].data(0,Qt.UserRole)
         if row['kind']=='ban':
             self.app.request_ban_context(row)
+            from user_history import event_blocks
+            self.preview.set_blocks(event_blocks(row));return
+        if row['kind'] in ('automod','reward_unmute'):
             from user_history import event_blocks
             self.preview.set_blocks(event_blocks(row));return
         if row['kind']=='delete':

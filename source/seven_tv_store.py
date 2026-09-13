@@ -17,6 +17,7 @@ ID=re.compile(r'(?:[0-9a-f]{24}|[0-9A-HJKMNP-TV-Z]{26})\Z',re.I)
 MAX_JSON=8*1024*1024
 MAX_PERSONAL_JSON=16*1024*1024
 MAX_IMAGE=16*1024*1024
+BINDING_VERSION='2'
 
 def permitted_url(url):
     try:
@@ -93,14 +94,21 @@ def parse_personal_user(user,uid,now=None):
     if not isinstance(user,dict):raise ValueError('Invalid 7TV user')
     sets=user.get('emote_sets') or []
     if not isinstance(sets,list) or len(sets)>100:raise ValueError('Invalid personal emote sets')
+    own=user.get('emote_set') or {}
+    own_set_id=str(own.get('id','')) if isinstance(own,dict) else ''
+    for connection in user.get('connections') or []:
+        if (isinstance(connection,dict) and connection.get('platform')=='TWITCH'
+                and str(connection.get('id',''))==str(uid)):
+            own_set_id=str(connection.get('emote_set_id','') or own_set_id);break
     emotes={};set_ids=[]
     for source in sets:
         if not isinstance(source,dict):continue
         sid=str(source.get('id',''))
         if not ID.fullmatch(sid):continue
+        if sid==own_set_id:continue
         parsed=_parse_emotes(source,personal=True,uid=str(uid))
         if parsed:set_ids.append(sid);emotes.update(parsed)
-    return {'version':1,'twitch_id':str(uid),'set_ids':set_ids,
+    return {'version':2,'twitch_id':str(uid),'own_set_id':own_set_id,'set_ids':set_ids,
         'observed_at':time.time() if now is None else now,'emotes':emotes}
 
 def fetch_personal_users(uids,fetcher=None):
@@ -109,7 +117,7 @@ def fetch_personal_users(uids,fetcher=None):
     if not uids or len(uids)>20 or any(not re.fullmatch(r'[0-9]{1,25}',uid) for uid in uids):raise ValueError('Invalid personal batch')
     declarations=','.join(f'$u{i}:String!' for i in range(len(uids)))
     fields='id name emotes{id name flags data{id name state flags animated host{url files{name format width height size}}}}'
-    selections=' '.join(f'u{i}:userByConnection(id:$u{i},platform:TWITCH){{id emote_sets(entitled:true){{{fields}}}}}' for i in range(len(uids)))
+    selections=' '.join(f'u{i}:userByConnection(id:$u{i},platform:TWITCH){{id connections{{id platform emote_set_id}} emote_sets(entitled:true){{{fields}}}}}' for i in range(len(uids)))
     body=json.dumps({'query':f'query({declarations}){{{selections}}}','variables':{f'u{i}':uid for i,uid in enumerate(uids)}}).encode()
     url=API+'/gql'
     if fetcher is not None:payload=fetcher(url,body,MAX_PERSONAL_JSON)
@@ -147,6 +155,12 @@ class EmoteStore:
         self.db=sqlite3.connect(self.root/'message-bindings.sqlite3',timeout=5)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('CREATE TABLE IF NOT EXISTS bindings (key TEXT PRIMARY KEY,channel TEXT,observed_at REAL,refs TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT)')
+        version=self.db.execute("SELECT value FROM metadata WHERE key='binding_version'").fetchone()
+        if not version or version[0]!=BINDING_VERSION:
+            self.db.execute('DELETE FROM bindings')
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES('binding_version',?)",(BINDING_VERSION,))
+            self.db.commit()
         self.memo={};self.dirty=False
     def install(self,catalog):
         channel=catalog['channel']
@@ -169,18 +183,22 @@ class EmoteStore:
         # Saved bindings are historical snapshots. Only unresolved rows retry.
         self.memo={k:v for k,v in self.memo.items() if v[1]}
     def users_for_set(self,set_id):return set(self.set_users.get(set_id,set()))
+    def genuine_personal(self,user_id):
+        personal=self.personal.get(user_id) or {};own={str(personal.get('own_set_id',''))}
+        own.update(str(c.get('set_id','')) for c in self.catalogs.values()
+            if c.get('channel')!='global' and str(c.get('twitch_id',''))==user_id)
+        return {alias:ref for alias,ref in personal.get('emotes',{}).items() if str(ref.get('set_id','')) not in own}
     def current(self,channel,user_id=''):
-        result=dict(self.catalogs.get('global',{}).get('emotes',{}))
-        result.update(self.catalogs.get(channel,{}).get('emotes',{}))
-        if user_id in self.personal:result.update(self.personal[user_id].get('emotes',{}))
+        result=dict(self.catalogs.get(channel,{}).get('emotes',{}))
+        if user_id in self.personal:result.update(self.genuine_personal(user_id))
         personal=self.personal.get(user_id)
-        complete=channel in self.catalogs and 'global' in self.catalogs and (not user_id or
+        complete=channel in self.catalogs and (not user_id or
             (personal is not None and time.time()-personal.get('observed_at',0)<900))
         return result,complete
     @staticmethod
     def message_key(row,slot='body'):
         text=row.get('text','')
-        return hashlib.sha256(json.dumps(['personal-v1',row.get('channel',''),row.get('user',''),row.get('id',''),row.get('time_utc',''),slot,text],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        return hashlib.sha256(json.dumps(['personal-v2',row.get('channel',''),row.get('user',''),row.get('id',''),row.get('time_utc',''),slot,text],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     def bind(self,row,slot='body'):
         channel=row.get('channel','');key=self.message_key(row,slot)
         if key in self.memo:return self.memo[key][0]

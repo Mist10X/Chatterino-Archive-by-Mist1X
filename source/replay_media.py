@@ -46,7 +46,7 @@ class CaptureMedia(threading.Thread):
         super().__init__(daemon=True);self.data=Path(data);self.tasks=queue.Queue(maxsize=30000)
         self.stopped=threading.Event();self.lock=threading.Lock();self.files_lock=threading.Lock();self.catalogs={};self.personal={};self.badges={};self.pending=set();self.results=queue.Queue();self.errors=0;self.cancelled=set()
         for p in (self.data/'7tv/catalogs').glob('*.json'):
-            try:self.catalogs[p.stem]=json.loads(p.read_text(encoding='utf-8'))['emotes']
+            try:self.catalogs[p.stem]=json.loads(p.read_text(encoding='utf-8'))
             except (OSError,ValueError,KeyError):pass
         for p in (self.data/'7tv/personal').glob('*.json'):
             try:
@@ -64,15 +64,24 @@ class CaptureMedia(threading.Thread):
         if not ref:return
         if (folder/'assets'/ref['file']).is_file():return
         self.submit(('asset',folder,dict(ref)),('asset',str(folder),ref['key']))
+    def catalog_emotes(self,channel):
+        value=self.catalogs.get(channel,{})
+        return value.get('emotes',{}) if isinstance(value.get('emotes'),dict) else value
+    def genuine_personal(self,uid):
+        personal=self.personal.get(uid) or {};own={str(personal.get('own_set_id',''))}
+        for channel,catalog in self.catalogs.items():
+            if channel!='global' and isinstance(catalog,dict) and str(catalog.get('twitch_id',''))==uid:
+                own.add(str(catalog.get('set_id','')))
+        return {alias:ref for alias,ref in personal.get('emotes',{}).items() if str(ref.get('set_id','')) not in own}
     def freeze(self,record,tags,folder):
         record.pop('_personal_pending',None)
         uid=str(record.get('user_id',''))
         with self.lock:
-            base={**self.catalogs.get('global',{}),**self.catalogs.get(record['channel'],{})}
+            base=dict(self.catalog_emotes(record['channel']))
             personal=self.personal.get(uid)
             badges={**self.badges.get('global',{}),**self.badges.get(record['channel'],{})}
         pending=[]
-        if uid.isdigit() and (not personal or time.time()-personal.get('observed_at',0)>900):
+        if uid.isdigit() and (not personal or personal.get('version')!=2 or time.time()-personal.get('observed_at',0)>900):
             self.submit(('personal',uid),('personal',uid));pending.append(uid)
         refs={} if uid.isdigit() and not personal else {t:dict(base[t]) for t in re.findall(r'\S+',record['text']) if t in base}
         # IRC ranges refer to the unmodified message, including ACTION wrapping.
@@ -87,17 +96,17 @@ class CaptureMedia(threading.Thread):
         # A personal alias is the user's explicit choice and wins over channel
         # and global 7TV aliases (and over a same-text native emote range).
         if personal:
-            owned=personal.get('emotes',{})
+            owned=self.genuine_personal(uid)
             refs.update({t:dict(owned[t]) for t in re.findall(r'\S+',record['text']) if t in owned})
         record['emote_refs']={k:v for k,v in refs.items() if v}
         record['badge_refs']=[badges[b] for b in tags.get('badges','').split(',') if b in badges]
         if record.get('reply'):
             reply=record['reply'];reply_uid=str(reply.get('user_id',''))
             with self.lock:reply_personal=self.personal.get(reply_uid)
-            if reply_uid.isdigit() and (not reply_personal or time.time()-reply_personal.get('observed_at',0)>900):
+            if reply_uid.isdigit() and (not reply_personal or reply_personal.get('version')!=2 or time.time()-reply_personal.get('observed_at',0)>900):
                 self.submit(('personal',reply_uid),('personal',reply_uid));pending.append(reply_uid)
             reply_catalog={} if reply_uid.isdigit() and not reply_personal else dict(base)
-            if reply_personal:reply_catalog.update(reply_personal.get('emotes',{}))
+            if reply_personal:reply_catalog.update(self.genuine_personal(reply_uid))
             reply['emote_refs']={t:dict(reply_catalog[t]) for t in re.findall(r'\S+',reply.get('text','')) if t in reply_catalog}
         if pending:record['_personal_pending']=sorted(set(pending))
         for ref in [*record['emote_refs'].values(),*record['badge_refs'],*record.get('reply',{}).get('emote_refs',{}).values()]:self.asset(folder,ref)
@@ -105,8 +114,8 @@ class CaptureMedia(threading.Thread):
     def apply_personal(self,record,uid,folder):
         """Correct a frozen row after a delayed Personal Emotes lookup."""
         with self.lock:
-            base={**self.catalogs.get('global',{}),**self.catalogs.get(record.get('channel',''),{})}
-            owned=self.personal.get(uid,{}).get('emotes',{})
+            base=dict(self.catalog_emotes(record.get('channel','')))
+            owned=self.genuine_personal(uid)
         def refresh(target,text):
             refs=dict(target.get('emote_refs',{}));removed=[]
             for alias,ref in list(refs.items()):
@@ -157,7 +166,7 @@ class CaptureMedia(threading.Thread):
                         if self.stopped.is_set():break
                         url='https://7tv.io/v3/emote-sets/global' if channel=='global' else 'https://7tv.io/v3/users/twitch/'+uid
                         try:
-                            value=parse_catalog(json.loads(fetch(url,MAX_JSON)),channel,uid)['emotes']
+                            value=parse_catalog(json.loads(fetch(url,MAX_JSON)),channel,uid)
                             with self.lock:self.catalogs[channel]=value
                         except Exception:pass
                         try:

@@ -9,6 +9,7 @@ class SharedModeration:
           CREATE TABLE IF NOT EXISTS shared_events(key TEXT PRIMARY KEY,user TEXT,user_id TEXT,channel TEXT,at_ms INTEGER,context TEXT,fetched_at INTEGER);
           CREATE INDEX IF NOT EXISTS shared_pair ON shared_events(user,channel,at_ms);
           CREATE TABLE IF NOT EXISTS shared_matches(shared_key TEXT PRIMARY KEY,local_key TEXT UNIQUE);
+          CREATE TABLE IF NOT EXISTS shared_files(path TEXT PRIMARY KEY,mtime INTEGER,size INTEGER);
         ''')
         # Keep local source rows intact. Negative sequence IDs distinguish external rows.
         expressions={'key':'s.key','kind':"'ban'",'user':'s.user','channel':'s.channel','at_ms':'s.at_ms',
@@ -19,9 +20,11 @@ class SharedModeration:
         self.db.execute('CREATE TEMP VIEW events AS SELECT rowid AS sequence,* FROM actions UNION ALL SELECT -s.rowid AS sequence,'+
             ','.join(expressions.get(c,'NULL')+' AS '+c for c in columns)+
             ' FROM shared_events s WHERE NOT EXISTS(SELECT 1 FROM shared_matches m WHERE m.shared_key=s.key)')
+        self.stamps={self.store.folder/r[0]:(r[1],r[2]) for r in self.db.execute('SELECT path,mtime,size FROM shared_files')}
         self.db.commit();self.rematch()
-    def sync(self,local_changed=False):
+    def sync(self,local_changed=False,max_seconds=None):
         changed=False
+        deadline=time.monotonic()+max_seconds if max_seconds is not None else float('inf')
         if time.monotonic()>=self.next_scan:
             self.next_scan=time.monotonic()+1
             paths=list((self.store.folder/'cards').glob('*.json'))+list((self.store.folder/'history').glob('*/*.json'))
@@ -44,6 +47,10 @@ class SharedModeration:
                             (key,card['user'],card['user_id'],row['channel'],row['since']*1000,json.dumps(context,ensure_ascii=False),card['fetched_at']))
                         changed=True
                     self.stamps[p]=signature
+                    self.db.execute('INSERT OR REPLACE INTO shared_files VALUES(?,?,?)',(str(p.relative_to(self.store.folder)),*signature))
+                    if time.monotonic()>=deadline:
+                        self.next_scan=0
+                        break
                 except OSError:continue
             self.db.commit()
         if changed or local_changed:self.rematch()

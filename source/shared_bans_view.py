@@ -3,6 +3,9 @@ import datetime as dt,queue
 from PySide6.QtCore import Qt,QTimer,QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDialog,QVBoxLayout,QLineEdit,QSplitter,QTextBrowser,QHeaderView
+from responsive import WrappedCells
+from ui_controls import ChannelCombo
+from emote_widgets import EmoteBrowser
 from theme import box,label,Button,combo,table,update_combo
 from stable_tree import reconcile,set_texts
 from storage import name
@@ -13,7 +16,7 @@ def stamp(at):
 
 class SharedBansDialog(QDialog):
     def __init__(self,app,user=''):
-        super().__init__(app);self.app=app;self.service=app.shared;self.card=None;self.requested='';self.auth_url=''
+        super().__init__(app);self.app=app;self.profiles=app.profiles;self.service=app.shared;self.card=None;self.requested='';self.auth_url=''
         self.setAttribute(Qt.WA_DeleteOnClose);self.setWindowTitle('Общие баны Chatterino+');self.resize(850,720);self.setMinimumSize(620,520)
         area=app.screen().availableGeometry();self.move(area.x()+max(0,(area.width()-self.width())//2),area.y()+30)
         layout=QVBoxLayout(self);layout.setContentsMargins(16,16,16,16);layout.setSpacing(10)
@@ -25,10 +28,10 @@ class SharedBansDialog(QDialog):
         search,sl=box(False);self.user=QLineEdit();self.user.setPlaceholderText('Ник пользователя Twitch');self.user.setText(user);sl.addWidget(self.user,1)
         self.find=Button('Показать баны',app.theme,lambda:self.fetch(False),primary=True);sl.addWidget(self.find)
         self.refresh=Button('Обновить',app.theme,lambda:self.fetch(True));sl.addWidget(self.refresh);layout.addWidget(search)
-        self.channel=combo(['Все каналы']);layout.addWidget(self.channel)
+        self.channel=ChannelCombo(['Все каналы']);self.channel.bind_profiles(app.profiles);layout.addWidget(self.channel)
         split=QSplitter(Qt.Vertical);split.setChildrenCollapsible(False)
-        self.tree=table(['Канал','Дата бана','Сообщений'],[200,220,120]);split.addWidget(self.tree)
-        self.preview=QTextBrowser();self.preview.setOpenLinks(False);self.preview.setOpenExternalLinks(False);self.preview.setMinimumHeight(140);split.addWidget(self.preview)
+        self.tree=table(['Канал','Дата бана','Сообщений'],[200,220,120]);self.tree.setItemDelegate(WrappedCells(self.tree));app.profiles.changed.connect(self.refresh_profiles);split.addWidget(self.tree)
+        self.preview=EmoteBrowser(app.emotes);self.preview.setOpenLinks(False);self.preview.setOpenExternalLinks(False);self.preview.setMinimumHeight(140);split.addWidget(self.preview)
         split.setSizes([280,240]);layout.addWidget(split,1)
         self.updated=label('',9,True);layout.addWidget(self.updated)
         self.status=label('Выбери пользователя для запроса. Сохранённые карточки доступны без подключения.',9,True);layout.addWidget(self.status)
@@ -76,6 +79,7 @@ class SharedBansDialog(QDialog):
         if not rows:self.preview.setPlainText('В полученной карточке нет записей по этим условиям. Это не доказывает отсутствие банов на Twitch.')
         elif self.tree.currentItem():self.show_row()
         else:self.tree.setCurrentItem(self.tree.topLevelItem(0))
+    def refresh_profiles(self,*_):self.tree.viewport().update()
     def show_row(self):
         item=self.tree.currentItem()
         if not item:return
@@ -84,7 +88,7 @@ class SharedBansDialog(QDialog):
         for message in row['messages']:
             lines.extend([('AutoMod · ' if message['automod'] else '')+stamp(message['at']),message['text'],''])
         if not row['messages']:lines.append('Сервис не передал текст сообщений для этого бана.')
-        self.preview.setPlainText('\n'.join(lines))
+        self.preview.set_blocks([{'text':line,'style':'title' if i==0 else ('meta' if i in (1,2) else 'body')} for i,line in enumerate(lines)])
     def closeEvent(self,event):self.timer.stop();super().closeEvent(event)
 
 def open_shared(app,user=''):

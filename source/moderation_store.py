@@ -8,7 +8,7 @@ from pathlib import Path
 from storage import name, atomic_write
 from moderation_groups import repeat_count,aggregate_target
 
-KINDS = {'ban', 'timeout', 'unban', 'untimeout', 'speech', 'identity', 'delete'}
+KINDS = {'ban', 'timeout', 'unban', 'untimeout', 'speech', 'identity', 'delete', 'automod'}
 
 
 class ModerationIndex:
@@ -36,12 +36,12 @@ class ModerationIndex:
             if column not in columns:self.db.execute('ALTER TABLE actions ADD COLUMN '+column+' TEXT')
         if 'last_at_ms' not in columns:self.db.execute('ALTER TABLE actions ADD COLUMN last_at_ms INTEGER')
         if 'repeat_count' not in columns:self.db.execute('ALTER TABLE actions ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 1')
-        if self.db.execute('PRAGMA user_version').fetchone()[0]<120:
+        if self.db.execute('PRAGMA user_version').fetchone()[0]<121:
             # The JSONL originals are authoritative. Rebuild only the disposable index
             # so old aggregate notifications receive the same grouping as new ones.
             if (self.data/'moderation.jsonl').exists() or (self.data/'twitch/deletions.jsonl').exists():
                 for table in ('actions','aliases','ingestion'):self.db.execute('DELETE FROM '+table)
-            self.db.execute('PRAGMA user_version=120')
+            self.db.execute('PRAGMA user_version=121')
         self.db.commit()
         from shared_moderation import SharedModeration
         self.combined=SharedModeration(self)
@@ -85,6 +85,7 @@ class ModerationIndex:
         if not isinstance(e, dict) or e.get('kind') not in KINDS:
             raise ValueError('Unknown moderation event')
         if e['kind']=='delete':return self.ingest_deletion(e)
+        if e['kind']=='automod':return self.ingest_automod(e)
         user, channel = name(e['user']), name(e['channel'])
         kind, stamp = e['kind'], int(e['at_ms'])
         if stamp < 0 or stamp > 253402300799999:
@@ -129,14 +130,17 @@ class ModerationIndex:
             existing=aggregate_target(self,e,key,user,channel,kind,stamp)
             grouped=existing is not None
         if not existing and kind in ('ban','timeout','unban','untimeout'):
-            # Merge a near-simultaneous IRC/EventSub report only across different sources,
-            # and never across an intervening action (e.g. unban -> a new ban).
+            # Chatterino can emit the same punishment more than once when several
+            # moderators act together. Same-source reports merge only when their
+            # non-empty system text is identical. Reports from distinct collectors
+            # still merge by action identity and time.
             candidates=self.db.execute('''SELECT * FROM actions WHERE user=? AND channel=? AND kind=?
                 AND duration IS ? AND abs(at_ms-?)<=1500 ORDER BY abs(at_ms-?)''',
                 (user,channel,kind,duration,stamp,stamp)).fetchall()
             for candidate in candidates:
                 if source in json.loads(candidate['sources']):
-                    continue
+                    raw=str(e.get('raw','')).strip()
+                    if not raw or raw!=candidate['raw'].strip():continue
                 low,high=sorted((stamp,candidate['at_ms']))
                 intervening=self.db.execute('''SELECT 1 FROM actions WHERE user=? AND channel=?
                     AND kind IN ('ban','timeout','unban','untimeout','speech')
@@ -160,6 +164,20 @@ class ModerationIndex:
             return int(update or best!=existing['context'])
         self.db.execute('INSERT INTO actions(key,kind,user,channel,at_ms,duration,basis,sources,raw,context,last_at_ms,repeat_count,message_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (key,kind,user,channel,stamp,duration,str(e.get('time_basis','server')),json.dumps([source]),str(e.get('raw','')),encoded_context,stamp,repeat_count(e.get('raw')),e.get('message_id','')))
+        return 1
+
+    def ingest_automod(self,e):
+        channel=name(e['channel']);user=name(e['user']);stamp=int(e['at_ms']);message_id=e.get('message_id','')
+        message=e.get('message')
+        if not message_id or len(message_id)>128 or not 0<stamp<=253402300799999:raise ValueError('Invalid AutoMod identity/time')
+        if not isinstance(message,dict) or message.get('id')!=message_id or message.get('user')!=user or message.get('channel')!=channel or not isinstance(message.get('text'),str):raise ValueError('Invalid AutoMod message')
+        message=dict(message);message.setdefault('time_utc',dt.datetime.fromtimestamp(stamp/1000,dt.timezone.utc).isoformat(timespec='milliseconds'));message['automod']=True
+        key=channel+'|automod|'+message_id;encoded=json.dumps(message,ensure_ascii=False)
+        old=self.db.execute('SELECT key FROM actions WHERE key=?',(key,)).fetchone()
+        if old:
+            self.db.execute('UPDATE actions SET message=?,raw=? WHERE key=?',(encoded,str(e.get('raw','Задержано AutoMod')),key));return 0
+        self.db.execute('''INSERT INTO actions(key,kind,user,channel,at_ms,duration,basis,sources,raw,context,message_id,message,last_at_ms,repeat_count)
+            VALUES(?,?,?,?,?,NULL,?,?,?,'[]',?,?,?,1)''',(key,'automod',user,channel,stamp,str(e.get('time_basis','eventsub')),json.dumps([str(e.get('source','twitch_eventsub'))]),str(e.get('raw','Задержано AutoMod')),message_id,encoded,stamp))
         return 1
 
     def sync(self,max_seconds=None):
@@ -193,7 +211,7 @@ class ModerationIndex:
                 self.db.execute('INSERT OR REPLACE INTO ingestion VALUES(?,?,?)',(ingestion_id,offset,invalid))
             if time.monotonic()>=deadline:break
         self.sync_shared()
-        return changed+int(self.combined.sync(bool(changed)))
+        return changed+int(self.combined.sync(bool(changed),max_seconds=max_seconds))
 
     def sync_shared(self):
         # The fork stores only a count and last observation time, without channel identities.
@@ -230,6 +248,7 @@ class ModerationIndex:
             return
 
     def status(self, row, now=None):
+        if row['kind']=='automod':return 'Сообщение задержано AutoMod',False
         if row['kind'] in ('unban','untimeout'):return ('Подтверждено снятие бана' if row['kind']=='unban' else 'Подтверждено снятие мута'),False
         now=int(time.time()*1000) if now is None else now
         user,channel,stamp=row['user'],row['channel'],row['at_ms']
@@ -277,20 +296,33 @@ class ModerationIndex:
         return {'total':len(names),'rows':[people[u] for u in names[:limit]]}
 
     def query(self, user='', channel='', kind='', offset=0, limit=100, now=None,exact_user=False):
-        terms=["kind IN ('ban','timeout','delete')"]
-        args=[]
+        selected=tuple(kind) if isinstance(kind,(tuple,list,set)) else ((kind,) if kind else ('ban','timeout','delete','reward_unmute','automod_ban'))
+        valid={'ban','timeout','delete','reward_unmute','automod_ban'}
+        if any(value not in valid for value in selected):raise ValueError('Invalid action filter')
+        ordinary=[value for value in selected if value in ('ban','timeout','delete')]
+        event_terms=[];event_args=[]
+        if ordinary:
+            event_terms.append('kind IN ('+','.join('?' for _ in ordinary)+')');event_args.extend(ordinary)
+        if 'automod_ban' in selected:
+            event_terms.append("""(kind='ban' AND (
+                (instr(context,'\"automod\": true')>0 OR instr(context,'\"automod\":true')>0) OR
+                EXISTS(SELECT 1 FROM actions held WHERE held.kind='automod' AND held.user=events.user
+                    AND held.channel=events.channel AND held.at_ms<=events.at_ms AND held.at_ms>=events.at_ms-120000) OR
+                EXISTS(SELECT 1 FROM shared_events direct_shared WHERE direct_shared.key=events.key
+                    AND (instr(direct_shared.context,'\"automod\": true')>0 OR instr(direct_shared.context,'\"automod\":true')>0)) OR
+                EXISTS(SELECT 1 FROM shared_matches matched JOIN shared_events shared ON shared.key=matched.shared_key
+                    WHERE matched.local_key=events.key AND (instr(shared.context,'\"automod\": true')>0 OR instr(shared.context,'\"automod\":true')>0))
+            ))""")
+        terms=['('+(' OR '.join(event_terms) if event_terms else '0')+')'];args=event_args
         if user.strip():
             # Nickname search is literal and case-insensitive; no wildcard or SQL interpolation.
             terms.append('user=?' if exact_user else 'instr(user,?)>0');args.append(user.strip().lower().lstrip('@'))
         if channel:
             terms.append('channel=?');args.append(name(channel))
-        if kind:
-            if kind not in ('ban','timeout','delete'): raise ValueError('Invalid action filter')
-            terms.append('kind=?');args.append(kind)
         where=' AND '.join(terms)
         counts=dict(self.db.execute('SELECT kind,count(*) FROM events WHERE '+where+' GROUP BY kind',args).fetchall())
         rows=[]
-        for row in self.db.execute('SELECT * FROM events WHERE '+where+' ORDER BY at_ms DESC,sequence DESC LIMIT ? OFFSET ?',args+[limit,offset]):
+        for row in self.db.execute('SELECT * FROM events WHERE '+where+' ORDER BY at_ms DESC,sequence DESC LIMIT ?',args+[offset+limit]):
             result=dict(row)
             result['status'],result['active']=self.status(row,now)
             result['context']=json.loads(row['context'])
@@ -300,14 +332,23 @@ class ModerationIndex:
             if uid:
                 for message in [*result['context'],result['message']]:
                     if isinstance(message,dict) and not message.get('user_id'):message['user_id']=uid
-            rows.append(self.evidence.enrich(self.combined.enrich(result)))
+            if result['kind'] in ('ban','timeout'):
+                held=self.db.execute("SELECT message FROM actions WHERE kind='automod' AND user=? AND channel=? AND at_ms<=? AND at_ms>=? ORDER BY at_ms DESC LIMIT 1",(result['user'],result['channel'],result['at_ms'],result['at_ms']-120000)).fetchone()
+                if held:
+                    message=json.loads(held[0])
+                    if not any(m.get('id')==message['id'] for m in result['context']):result['context'].append(message)
+            result=self.evidence.enrich(self.combined.enrich(result))
+            result['automod_ban']=result['kind']=='ban' and any(isinstance(message,dict) and message.get('automod') for message in result['context'])
+            rows.append(result)
+        rewards=self.evidence.unmute_rows(user.strip().lower().lstrip('@') if user.strip() else '',name(channel) if channel else '') if 'reward_unmute' in selected else []
+        rows=sorted(rows+rewards,key=lambda r:(r['at_ms'],r['sequence']),reverse=True)[offset:offset+limit]
         hint=None
         if user.strip():
             hint=self.db.execute('''SELECT n,at_seconds FROM shared_hints h JOIN identities i ON h.user_id=i.user_id
                 WHERE i.user=?''',(user.strip().lower().lstrip('@'),)).fetchone()
         channels=[r[0] for r in self.db.execute('SELECT DISTINCT channel FROM events ORDER BY channel')]
         invalid=self.db.execute('SELECT coalesce(sum(invalid),0) FROM ingestion').fetchone()
-        return {'total':sum(counts.values()),'bans':counts.get('ban',0),'timeouts':counts.get('timeout',0),'deletions':counts.get('delete',0),
+        return {'total':sum(counts.values())+len(rewards),'bans':counts.get('ban',0),'timeouts':counts.get('timeout',0),'deletions':counts.get('delete',0),'automod':sum(1 for row in rows if row.get('automod_ban')),'unmutes':len(rewards),
                 'rows':rows,'channels':channels,'hint':dict(hint) if hint else None,'invalid':invalid[0] if invalid else 0}
 
     def close(self):

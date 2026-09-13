@@ -20,3 +20,6 @@ archive-profile.json
 
 test-results.txt
 build-log.txt
+
+# Disposable local review/test artifacts
+work-*

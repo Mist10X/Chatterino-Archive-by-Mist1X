@@ -54,6 +54,13 @@ class StoreTests(unittest.TestCase):
             return json.dumps({'data':{'u0':{'emote_sets':[]},'u1':{'emote_sets':[]}}}).encode()
         result=fetch_personal_users(['456','789'],fake);self.assertEqual(set(result),{'456','789'})
         self.assertTrue(permitted_url('https://7tv.io/v3/gql'))
+    def test_own_channel_set_is_not_personal(self):
+        owned=personal()
+        active={'id':'01F6ME9FRG0005TFYTWP1H8R42','name':'Smile','flags':0,'data':{'id':'01F6ME9FRG0005TFYTWP1H8R42','name':'Smile','state':['PERSONAL'],'animated':False,'flags':0,
+            'host':{'url':'//cdn.7tv.app/emote/01F6ME9FRG0005TFYTWP1H8R42','files':[{'name':'3x.webp','format':'WEBP','width':96,'height':96,'size':1000}]}}}
+        own=parse_personal_user({'connections':[{'platform':'TWITCH','id':'456','emote_set_id':'01KEAJ6HE8YS6BM2M2K1DDV4KP'}],
+            'emote_sets':[{'id':'01KEAJ6HE8YS6BM2M2K1DDV4KP','emotes':[active]}]},'456')
+        self.assertEqual(own['emotes'],{});self.assertEqual(own['own_set_id'],'01KEAJ6HE8YS6BM2M2K1DDV4KP')
     def test_eventapi_refreshes_only_personal_users_and_sets(self):
         entitlement={'op':0,'d':{'type':'entitlement.create','body':{'object':{'kind':'EMOTE_SET','ref_id':'01KEAJ6HE8YS6BM2M2K1DDV4KP','user':{'connections':[{'platform':'TWITCH','id':'456'},{'platform':'KICK','id':'9'}]}}}}}
         self.assertEqual(personal_event(entitlement),[('user','456','01KEAJ6HE8YS6BM2M2K1DDV4KP')])
@@ -78,8 +85,8 @@ class StoreTests(unittest.TestCase):
     def test_unresolved_channel_does_not_freeze_global_guess(self):
         with tempfile.TemporaryDirectory() as tmp:
             s=EmoteStore(tmp);s.install(catalog('global'));row={'channel':'one','user':'u','id':'m','text':'Smile'}
-            first=s.bind(row)['Smile']['id'];s.install(catalog('one',eid='01F6ME9FRG0005TFYTWP1H8R42'))
-            self.assertNotEqual(s.bind(row)['Smile']['id'],first);s.close()
+            self.assertEqual(s.bind(row),{});s.install(catalog('one',eid='01F6ME9FRG0005TFYTWP1H8R42'))
+            self.assertIn('Smile',s.bind(row));s.close()
     def test_network_and_cache_paths_cannot_escape_7tv(self):
         for url in ['http://cdn.7tv.app/emote/abc/3x.webp','https://cdn.7tv.app.evil.test/emote/abc/3x.webp','https://127.0.0.1/emote/abc/3x.webp','https://7tv.io:bad/v3/emote-sets/global','https://cdn.7tv.app/emote/abc/../../x','file:///C:/secret','https://user@7tv.io/v3/emote-sets/global']:
             self.assertFalse(permitted_url(url),url)

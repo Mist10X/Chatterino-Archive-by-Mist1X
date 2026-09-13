@@ -196,5 +196,21 @@ test('excluded open channel detaches and remains available for trim discovery',f
     eq(next(channels.morphe_ya.callbacks),nil)
 end)
 
+test('hourly trim keeps protected channels and never touches archives',function()
+    all_open({'dangerlyoha','morphe_ya'})
+    put('panel-control.txt','HT2\nrevision\tauto-hourly\nkeep\t1000\nauto_trim\ton\nauto_trim_interval\t60\nauto_trim_keep\t1000\nuser\tmist1x_x\ton\nchannel\tdangerlyoha\nchannel\tmorphe_ya\ntrim_preserve\tmorphe_ya\nEND\n')
+    tick()
+    for i=1,1010 do
+        channels.dangerlyoha:add_message(msg('auto-danger-'..i,'not_tracked','dangerlyoha'))
+        channels.morphe_ya:add_message(msg('auto-morphe-'..i,'not_tracked','morphe_ya'))
+    end
+    local protected=channels.morphe_ya:count_messages();local original=get('mist1x_x--dangerlyoha.jsonl')
+    for _=1,28 do tick() end
+    assert(channels.dangerlyoha:count_messages()>1000)
+    tick();eq(channels.dangerlyoha:count_messages(),1000);eq(channels.morphe_ya:count_messages(),protected)
+    eq(get('mist1x_x--dangerlyoha.jsonl'),original)
+    assert(get('panel-status.json'):find('"auto_trim":true',1,true))
+end)
+
 io.open=realopen
 print(tests..' integration tests passed')

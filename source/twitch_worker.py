@@ -100,8 +100,8 @@ class TwitchWorker(threading.Thread):
 
     def start_auth(self):
         self.close_socket();self.auth = None;self.auth_blocked=False;self.report(phase='auth', text='Открываем вход Twitch…', auth_url='', auth_code='')
-        from moderation_evidence import MOD_SCOPES,REWARD_SCOPE
-        scopes=SCOPES+(MOD_SCOPES+[REWARD_SCOPE,'user:read:moderated_channels'] if self.config.get('moderation_details') else [])
+        from moderation_evidence import MOD_SCOPES,REWARD_SCOPE,AUTOMOD_SCOPE
+        scopes=SCOPES+(MOD_SCOPES+[REWARD_SCOPE,AUTOMOD_SCOPE,'user:read:moderated_channels'] if self.config.get('moderation_details') else [])
         result = self.api.request('device', {'client_id': CLIENT_ID, 'scopes': ' '.join(scopes)})
         from urllib.parse import urlparse
         url = result.get('verification_uri', '');parsed = urlparse(url)

@@ -6,6 +6,11 @@ from storage import atomic_write,name
 
 MOD_SCOPES=['moderator:read:'+s for s in ('blocked_terms','chat_settings','unban_requests','banned_users','chat_messages','warnings','moderators','vips')]
 REWARD_SCOPE='channel:read:redemptions'
+AUTOMOD_SCOPE='moderator:manage:automod'
+
+def reward_target(value):
+    match=re.match(r'\s*@?([A-Za-z0-9_]{1,25})(?=$|[\s,])',value or '')
+    return match[1].lower() if match else ''
 
 def millis(value):return int(dt.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()*1000)
 def rules_load(data):
@@ -16,9 +21,13 @@ def rules_save(data,rules):
     for r in rules:
         if r['action'] not in ('timeout','untimeout'):raise ValueError('Неизвестное действие награды.')
         template=r.get('template','').strip()
-        if template.count('{buyer}')!=1 or template.count('{target}')!=1:raise ValueError('В подтверждении нужны {buyer} и {target} — по одному разу.')
-        clean.append({'channel':name(r['channel']),'reward':str(r['reward']),'action':r['action'],'bot':name(r['bot']),
-            'template':template,'self':bool(r.get('self'))})
+        mode=r.get('mode','bot')
+        if mode not in ('bot','correlation'):raise ValueError('Неизвестный способ сопоставления.')
+        if mode=='bot' and (template.count('{buyer}')!=1 or template.count('{target}')!=1):raise ValueError('В подтверждении нужны {buyer} и {target} — по одному разу.')
+        duration=int(r.get('duration',0))
+        if mode=='correlation' and r['action']=='timeout' and not 0<duration<=1209600:raise ValueError('Укажи длительность мута в секундах.')
+        clean.append({'channel':name(r['channel']),'reward':str(r['reward']),'action':r['action'],'bot':name(r['bot']) if mode=='bot' else '',
+            'template':template,'self':bool(r.get('self')) if mode=='bot' else False,'mode':mode,'duration':duration,'title':str(r.get('title',''))[:200]})
     atomic_write(Path(data)/'reward-rules.json',json.dumps(clean,ensure_ascii=False,indent=2))
 
 class EvidenceWriter:
@@ -65,12 +74,21 @@ class Evidence:
         row['executors']=[x[0] for x in self.db.execute('SELECT actor FROM executors WHERE action_key=?',(row['key'],))]
         row['reward_attribution']=None
         row['lifted_by']=None
+        row['unmute_purchases']=[]
         stamp=row['at_ms'];channel=row['channel'];kind=row['kind']
         if kind in ('ban','timeout'):
             later=self.db.execute("SELECT * FROM events WHERE channel=? AND user=? AND kind IN ('ban','timeout','unban','untimeout') AND at_ms>? ORDER BY at_ms,sequence LIMIT 1",(channel,row['user'],stamp)).fetchone()
             if later and later['kind'] in ('unban','untimeout'):
                 lifted=self.enrich(dict(later))
                 if lifted['executors'] or lifted['reward_attribution']:row['lifted_by']=lifted
+            if kind=='timeout' and not row['lifted_by']:
+                end=min(stamp+int(row.get('duration') or 0)*1000,later['at_ms'] if later else 253402300799999)
+                reward_ids={r['reward'] for r in rules_load(self.data) if r['channel']==channel and r['action']=='untimeout'}
+                purchases=[json.loads(p[0]) for p in self.db.execute("SELECT payload FROM evidence WHERE channel=? AND kind='reward' AND at_ms>? AND at_ms<?",(channel,stamp,end))]
+                for receipt in purchases:
+                    target=reward_target(receipt['input'])
+                    canceled=any(o.get('status')=='canceled' and o['buyer']==receipt['buyer'] and o['reward']==receipt['reward'] and o['input']==receipt['input'] and abs(o['at_ms']-receipt['at_ms'])<=5000 for o in purchases)
+                    if target==row['user'] and receipt['reward'] in reward_ids and not canceled:row['unmute_purchases'].append(receipt['buyer'])
         if kind not in ('timeout','untimeout'):return row
         rules=[r for r in rules_load(self.data) if r['channel']==channel and r['action']==kind]
         if not rules:return row
@@ -78,6 +96,20 @@ class Evidence:
         replies=[json.loads(x[0]) for x in self.db.execute("SELECT payload FROM evidence WHERE channel=? AND kind='bot_result' AND at_ms BETWEEN ? AND ?",(channel,stamp-5000,stamp+5000))]
         matches=[]
         for rule in rules:
+            if rule.get('mode')=='correlation':
+                if kind=='timeout' and row.get('duration')!=rule['duration']:continue
+                candidates=[]
+                for receipt in receipts:
+                    target=reward_target(receipt['input'])
+                    if target!=row['user'] or receipt['reward']!=rule['reward'] or stamp-receipt['at_ms']>15000:continue
+                    if receipt.get('status')=='canceled' or any(o.get('status')=='canceled' and o['buyer']==receipt['buyer'] and o['reward']==receipt['reward'] and o['input']==receipt['input'] and abs(o['at_ms']-receipt['at_ms'])<=5000 for o in receipts):continue
+                    candidates.append(receipt)
+                if len(candidates)!=1:continue
+                receipt=candidates[0]
+                near=self.db.execute("SELECT key FROM events WHERE channel=? AND user=? AND kind=? AND at_ms BETWEEN ? AND ?",(channel,row['user'],kind,receipt['at_ms'],receipt['at_ms']+15000)).fetchall()
+                if len(near)!=1 or near[0][0]!=row['key']:continue
+                matches.append({'buyer':receipt['buyer'],'self':False,'intended':row['user'],'receipt':receipt['id'],'confirmation':None,'mode':'correlation','title':rule.get('title','')})
+                continue
             pattern=re.escape(rule['template']).replace(re.escape('{buyer}'),r'@?(?P<buyer>[A-Za-z0-9_]{1,25})').replace(re.escape('{target}'),r'@?(?P<target>[A-Za-z0-9_]{1,25})')
             for reply in replies:
                 if reply['bot']!=rule['bot']:continue
@@ -88,9 +120,9 @@ class Evidence:
                 for receipt in receipts:
                     canceled=any(other.get('status')=='canceled' and other['buyer']==receipt['buyer'] and other['reward']==receipt['reward'] and other['input']==receipt['input'] and abs(other['at_ms']-receipt['at_ms'])<=5000 for other in receipts)
                     if canceled:continue
-                    target=re.fullmatch(r'\s*@?([A-Za-z0-9_]{1,25})\s*',receipt['input'])
-                    if not target or receipt.get('status')=='canceled' or receipt['reward']!=rule['reward'] or receipt['buyer']!=buyer or receipt['at_ms']>reply['at_ms']:continue
-                    intended=target[1].lower();self_mute=kind=='timeout' and rule.get('self') and row['user']==buyer and intended!=buyer
+                    intended=reward_target(receipt['input'])
+                    if not intended or receipt.get('status')=='canceled' or receipt['reward']!=rule['reward'] or receipt['buyer']!=buyer or receipt['at_ms']>reply['at_ms']:continue
+                    self_mute=kind=='timeout' and rule.get('self') and row['user']==buyer and intended!=buyer
                     if intended==row['user'] or self_mute:candidates.append((receipt,intended,self_mute))
                 # No arbitrary choice between competing purchases or actions.
                 if len(candidates)!=1:continue
@@ -101,12 +133,39 @@ class Evidence:
         if len(matches)==1:row['reward_attribution']=matches[0]
         return row
 
+    def unmute_rows(self,user='',channel=''):
+        rules={(r['channel'],r['reward']):r for r in rules_load(self.data) if r['action']=='untimeout'}
+        if not rules:return []
+        args=[];where="kind='reward'"
+        if channel:where+=' AND channel=?';args.append(channel)
+        events=[json.loads(p[0]) for p in self.db.execute('SELECT payload FROM evidence WHERE '+where,args)]
+        rows=[];seen=[]
+        for receipt in sorted(events,key=lambda e:e['at_ms'],reverse=True):
+            target=reward_target(receipt.get('input',''))
+            if not target or (user and target!=user) or (receipt['channel'],receipt['reward']) not in rules or receipt.get('status')=='canceled':continue
+            duplicate=next((old for old in seen if old['buyer']==receipt['buyer'] and old['reward']==receipt['reward'] and reward_target(old.get('input',''))==target and abs(old['at_ms']-receipt['at_ms'])<=5000),None)
+            if duplicate:continue
+            seen.append(receipt)
+            confirmed=self.db.execute("SELECT key FROM events WHERE kind IN ('untimeout','unban') AND user=? AND channel=? AND at_ms BETWEEN ? AND ? LIMIT 1",(target,receipt['channel'],receipt['at_ms'],receipt['at_ms']+15000)).fetchone()
+            rows.append({'key':'reward-unmute|'+str(receipt['id']),'kind':'reward_unmute','user':target,'channel':receipt['channel'],'at_ms':receipt['at_ms'],
+                'duration':None,'basis':'reward','sources':'["twitch_reward"]','raw':'','context':[],'message_id':'','message':None,
+                'last_at_ms':receipt['at_ms'],'repeat_count':1,'sequence':-receipt['at_ms'],'status':'Снятие мута подтверждено' if confirmed else 'Покупка анмута; снятие мута не подтверждено',
+                'active':False,'origin':'Награда канала','executors':[],'reward_attribution':{'buyer':receipt['buyer'],'intended':target,'self':False,'mode':'correlation'},'lifted_by':None,'unmute_purchases':[]})
+        return rows
+
 def attribution_blocks(row):
     blocks=[];actors=row.get('executors',[])
     if actors:blocks.append({'text':('Снял наказание: ' if row['kind'] in ('unban','untimeout') else 'Выполнил: ')+', '.join('@'+a for a in actors)+' · подтверждено Twitch','style':'meta'})
     reward=row.get('reward_attribution')
     if reward:
         text=('Получил мут сам от себя: покупка награды для @'+reward['intended']) if reward['self'] else ('@'+reward['buyer']+(' купил снятие мута' if row['kind']=='untimeout' else ' купил мут'))
-        blocks.append({'text':text+' · подтверждено наградой, ботом и событием','style':'meta'})
+        suffix=' · сопоставлено по награде, цели, времени и событию; исполнитель не подтверждён' if reward.get('mode')=='correlation' else ' · подтверждено наградой, ботом и событием'
+        if row['kind'] in ('untimeout','reward_unmute'):
+            blocks.append({'text':'АНМУТ КУПИЛ @'+reward['buyer'],'style':'reward_notice'})
+            blocks.append({'text':suffix.lstrip(' ·'),'style':'body'})
+        else:blocks.append({'text':text+suffix,'style':'meta'})
     if row.get('lifted_by'):blocks.extend(attribution_blocks(row['lifted_by']))
+    for buyer in sorted(set(row.get('unmute_purchases',[]))):
+        blocks.append({'text':'АНМУТ КУПИЛ @'+buyer,'style':'reward_notice'})
+        blocks.append({'text':'Отдельное событие снятия мута не получено.','style':'body'})
     return blocks

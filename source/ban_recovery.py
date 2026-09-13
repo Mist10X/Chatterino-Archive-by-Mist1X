@@ -19,7 +19,7 @@ class Recovery:
                 records=source.execute("SELECT key,user,at_ms FROM actions WHERE kind='ban' AND at_ms>? ORDER BY at_ms DESC LIMIT 500",(int((now-2*86400)*1000),)).fetchall()
                 completed={r[0] for r in source.execute("SELECT m.local_key FROM shared_matches m JOIN shared_events s ON s.key=m.shared_key WHERE s.context<>'[]'")}
             with self.db:
-                for key,user,at in records:self.db.execute('INSERT OR IGNORE INTO pending(key,user,at_ms,due) VALUES(?,?,?,?)',(key,user,at,now+5))
+                for key,user,at in records:self.db.execute('INSERT OR IGNORE INTO pending(key,user,at_ms,due) VALUES(?,?,?,?)',(key,user,at,now))
                 for key in completed:self.db.execute("UPDATE pending SET state='complete',reason='' WHERE key=?",(key,))
         except sqlite3.Error:return
     def prioritize(self,user):
@@ -40,16 +40,16 @@ class Recovery:
             with self.db:self.db.execute("UPDATE pending SET due=? WHERE state='pending' AND reason='connection'",(now,))
             self.next_fetch=min(self.next_fetch,now)
         self.was_connected=connected
-        if now>=self.next_scan:self.next_scan=now+5;self.scan(now)
+        if now>=self.next_scan:self.next_scan=now+1;self.scan(now)
         if not self.service.network or not self.service.account or self.service.auth or not self.service.commands.empty():return
-        if now<self.next_fetch or time.monotonic()-self.service.last_request<15:return
-        row=self.db.execute("SELECT * FROM pending WHERE state='pending' AND due<=? ORDER BY due,at_ms DESC LIMIT 1",(now,)).fetchone()
+        if now<self.next_fetch or time.monotonic()-self.service.last_request<3:return
+        row=self.db.execute("SELECT * FROM pending WHERE state='pending' AND due<=? ORDER BY (due=0) DESC,(attempts=0) DESC,at_ms DESC LIMIT 1",(now,)).fetchone()
         if not row:return
-        self.next_fetch=now+15
+        self.next_fetch=now+3
         try:
             # Known IDs can be queried even while the separate Twitch connection is down.
             self.service.fetch(row['user'],True)
-            attempt=row['attempts']+1;delays=[30,120,600,3600,21600]
+            attempt=row['attempts']+1;delays=[5 if now-row['at_ms']/1000<120 else 30,120,600,3600,21600]
             with self.db:self.db.execute("UPDATE pending SET attempts=?,due=?,state=?,reason='waiting_for_context' WHERE user=? AND state='pending'",
                 (attempt,now+delays[min(attempt-1,4)],'pending' if attempt<5 else 'unavailable',row['user']))
             self.next_scan=0

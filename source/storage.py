@@ -71,6 +71,10 @@ class Control:
         self.channels = []
         self.excluded = set()
         self.keep = 1000
+        self.auto_trim = True
+        self.auto_trim_interval = 3600
+        self.auto_trim_keep = 1000
+        self.trim_preserved = {"dangerlyoha", "morphe_ya"}
         self.revision = ""
         if self.path.exists():
             self.load()
@@ -95,6 +99,11 @@ class Control:
         if not lines or lines[0] != "HT2" or lines[-1] != "END":
             raise ValueError("Настройки панели повреждены. Сохранённые сообщения не затронуты.")
         users, channels, revision, keep = {}, [], None, 1000
+        # Older configurations did not contain automatic trimming fields. The
+        # first upgraded run enables the requested safe defaults.
+        auto_trim, auto_trim_interval, auto_trim_keep = True, 3600, 1000
+        trim_preserved = {"dangerlyoha", "morphe_ya"}
+        trim_preserve_seen = False
         excluded = set()
         for line in lines[1:-1]:
             fields = line.split("\t")
@@ -108,19 +117,40 @@ class Control:
                 channels.append(name(fields[1]))
             elif len(fields) == 2 and fields[0] == "exclude":
                 excluded.add(name(fields[1]))
+            elif len(fields) == 2 and fields[0] == "auto_trim" and fields[1] in ("on", "off"):
+                auto_trim = fields[1] == "on"
+            elif len(fields) == 2 and fields[0] == "auto_trim_interval":
+                auto_trim_interval = int(fields[1])
+            elif len(fields) == 2 and fields[0] == "auto_trim_keep":
+                auto_trim_keep = int(fields[1])
+            elif len(fields) == 2 and fields[0] == "trim_preserve":
+                if not trim_preserve_seen:trim_preserved.clear();trim_preserve_seen=True
+                trim_preserved.add(name(fields[1]))
+            elif len(fields) == 2 and fields[0] == "trim_preserve_count":
+                if int(fields[1]) < 0 or int(fields[1]) > 1000:raise ValueError("Invalid trim preserve count")
+                if not trim_preserve_seen:trim_preserved.clear();trim_preserve_seen=True
             else:
                 raise ValueError("Неизвестная строка настроек панели.")
-        if not revision or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", revision) or not 1 <= keep <= 1000000:
+        if (not revision or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", revision)
+                or not 1 <= keep <= 1000000 or not 60 <= auto_trim_interval <= 86400
+                or not 1 <= auto_trim_keep <= 1000000):
             raise ValueError("Недопустимая версия настроек или размер истории.")
         self.users, self.channels, self.keep, self.revision = users, sorted(set(channels)-excluded), keep, revision
         self.excluded = excluded
+        self.auto_trim, self.auto_trim_interval, self.auto_trim_keep = auto_trim, auto_trim_interval, auto_trim_keep
+        self.trim_preserved = trim_preserved
 
     def save(self):
         revision = uuid.uuid4().hex
-        lines = ["HT2", "revision\t" + revision, "keep\t" + str(self.keep)]
+        lines = ["HT2", "revision\t" + revision, "keep\t" + str(self.keep),
+            "auto_trim\t" + ("on" if self.auto_trim else "off"),
+            "auto_trim_interval\t" + str(self.auto_trim_interval),
+            "auto_trim_keep\t" + str(self.auto_trim_keep)]
         lines += [f"user\t{name(user)}\t{'on' if enabled else 'off'}" for user, enabled in sorted(self.users.items())]
         lines += [f"channel\t{name(channel)}" for channel in sorted(set(self.channels))]
         lines += [f"exclude\t{channel}" for channel in sorted(self.excluded)]
+        lines += [f"trim_preserve_count\t{len(self.trim_preserved)}"]
+        lines += [f"trim_preserve\t{name(channel)}" for channel in sorted(self.trim_preserved)]
         atomic_write(self.path, "\n".join(lines + ["END", ""]))
         self.revision = revision
         self.channels = sorted(set(self.channels))

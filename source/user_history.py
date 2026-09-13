@@ -10,7 +10,7 @@ def millis(value):
 
 def event_message(row):
     """Return the message represented by a moderation row, preferring its exact evidence."""
-    if row.get('kind')=='delete':
+    if row.get('kind') in ('delete','automod'):
         message=row.get('message')
         if message and message.get('state')=='available' and isinstance(message.get('text'),str):return message
     context=[m for m in row.get('context',[]) if isinstance(m,dict) and isinstance(m.get('text'),str) and m.get('text').strip()]
@@ -20,6 +20,7 @@ def event_message(row):
     return max(enumerate(context),key=lambda pair:(millis(pair[1].get('time_utc','')),bool(pair[1].get('automod')),pair[0]))[1]
 
 def event_summary(row,limit=220):
+    if row.get('kind')=='reward_unmute':return 'Анмут купил @'+row['reward_attribution']['buyer']
     message=event_message(row)
     if not message:return 'Сообщение недоступно'
     value=' '.join(message['text'].split())
@@ -29,7 +30,20 @@ def event_summary(row,limit=220):
 
 def event_table_summary(row,limit=220):
     prefix='Заменён новым наказанием · ' if row.get('status')=='Заменён новым наказанием' else ''
+    reward=row.get('reward_attribution')
+    if row.get('kind')=='timeout' and reward:
+        return prefix+('Мут купил @'+reward['buyer']+(' · получил мут сам' if reward.get('self') else ''))
     return prefix+event_summary(row,max(1,limit-len(prefix)))
+
+def event_kind_label(row):
+    labels={'ban':'Бан','timeout':'Мут','delete':'Удаление','automod':'AutoMod','reward_unmute':'Размут',
+        'message':'Сообщение','unban':'Разбан','untimeout':'Снят мут','speech':'Снова пишет'}
+    value=labels[row['kind']]
+    if row['kind']=='ban':
+        if str(row.get('status','')).startswith('Снят:'):value+=' · снят'
+        if row.get('automod_ban'):value+=' · AutoMod'
+    if row['kind']=='timeout' and row.get('duration') is not None:value+=f" · {row['duration']} с"
+    return value
 
 class UserHistory:
     def __init__(self,archive,moderation):self.archive=archive;self.mod=moderation;self.signature=None;self.rows=[]
@@ -68,7 +82,7 @@ class UserHistory:
                             message(m,'Повтор чата')
                 except (OSError,ValueError,KeyError,sqlite3.Error):warnings.append('Один из повторов временно недоступен; обнови карточку позже.')
             contexts=[]
-            for raw in self.mod.db.execute("SELECT * FROM events WHERE user=? AND kind IN ('ban','timeout','delete','unban','untimeout','speech')",(user,)):
+            for raw in self.mod.db.execute("SELECT * FROM events WHERE user=? AND kind IN ('ban','timeout','delete','automod','unban','untimeout','speech')",(user,)):
                 row=dict(raw);row['context']=json.loads(row['context']);row['message']=json.loads(row['message']) if row['message'] else None
                 row['status'],row['active']=self.mod.status(raw);self.mod.combined.enrich(row);self.mod.evidence.enrich(row);rows[row['key']]=row
                 contexts.extend(row['context'])
@@ -114,10 +128,14 @@ def event_blocks(row):
     from emote_widgets import message_blocks
     if row['kind']=='message':
         return [{'text':row['origin'],'style':'meta'}]+([{'text':'AutoMod: сообщение было задержано','style':'deletion'}] if row['message'].get('automod') else [])+message_blocks(row['message'],local_time)
-    labels={'ban':'БАН','timeout':'МУТ','delete':'УДАЛЕНИЕ СООБЩЕНИЯ','unban':'РАЗБАН','untimeout':'СНЯТИЕ МУТА','speech':'ПОЛЬЗОВАТЕЛЬ СНОВА ПИШЕТ'}
+    labels={'ban':'БАН','timeout':'МУТ','delete':'УДАЛЕНИЕ СООБЩЕНИЯ','automod':'AUTOMOD · СООБЩЕНИЕ ЗАДЕРЖАНО','reward_unmute':'РАЗМУТ','unban':'РАЗБАН','untimeout':'СНЯТИЕ МУТА','speech':'ПОЛЬЗОВАТЕЛЬ СНОВА ПИШЕТ'}
     blocks=[{'text':labels[row['kind']]+' · @'+row['user']+' · #'+row['channel'],'style':'title'},
         {'text':stamp(row['at_ms'])+' · '+row.get('origin','Наш архив'),'style':'meta'}]
-    if row['kind'] in ('ban','timeout','delete'):blocks.append({'text':row.get('status',''),'style':'meta'})
+    if row['kind'] in ('ban','timeout','delete','automod','reward_unmute'):blocks.append({'text':row.get('status',''),'style':'meta'})
+    if row['kind'] in ('automod','reward_unmute'):
+        if row['kind']=='automod' and row.get('message'):blocks.extend(message_blocks(row['message'],local_time))
+        from moderation_evidence import attribution_blocks
+        return blocks+attribution_blocks(row)
     if row.get('duration') is not None:blocks.append({'text':f"Длительность: {row['duration']} с",'style':'meta'})
     if row.get('shared_fetched_at'):blocks.append({'text':'Данные Chatterino+ получены: '+stamp(row['shared_fetched_at']*1000),'style':'meta'})
     context=sorted(row.get('context',[]),key=lambda m:millis(m.get('time_utc','')))

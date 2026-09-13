@@ -1,5 +1,5 @@
 import unittest
-from user_history import event_message,event_summary,event_table_summary
+from user_history import event_message,event_summary,event_table_summary,event_kind_label
 
 def message(text,seconds,automod=False,state='available'):
     return {'text':text,'time_utc':f'2026-09-10T17:00:{seconds:02}.000Z','automod':automod,'state':state}
@@ -28,5 +28,10 @@ class EventSummaryTests(unittest.TestCase):
         row={'kind':'timeout','status':'Заменён новым наказанием','context':[message('последнее',1)]}
         self.assertEqual(event_table_summary(row),'Заменён новым наказанием · последнее')
         row['status']='Мут действует';self.assertEqual(event_table_summary(row),'последнее')
+    def test_removed_ban_is_labeled_in_every_event_list(self):
+        row={'kind':'ban','status':'Снят: событие разбана','context':[]}
+        self.assertEqual(event_kind_label(row),'Бан · снят')
+        row['automod_ban']=True;self.assertEqual(event_kind_label(row),'Бан · снят · AutoMod')
+        row['status']='Бан: снятие не замечено';self.assertEqual(event_kind_label(row),'Бан · AutoMod')
 
 if __name__=='__main__':unittest.main()

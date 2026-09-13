@@ -1,7 +1,7 @@
 import json,tempfile,unittest
 from pathlib import Path
 from moderation_store import ModerationIndex
-from moderation_evidence import rules_save,MOD_SCOPES,REWARD_SCOPE
+from moderation_evidence import rules_save,MOD_SCOPES,REWARD_SCOPE,AUTOMOD_SCOPE,millis
 from moderation_events import notification,ModerationEvents
 
 BASE=1789200000000
@@ -18,7 +18,7 @@ class EvidenceTests(unittest.TestCase):
         self.index.ingest({'kind':'reward','id':ident,'channel':'channel','buyer':buyer,'reward':reward,'input':'@'+target,'at_ms':at,'status':status})
     def bot(self,text='buyer muted target',bot='trustedbot',at=BASE+2100):
         self.index.ingest({'kind':'bot_result','id':str(at)+text,'channel':'channel','bot':bot,'text':text,'at_ms':at})
-    def row(self):return self.index.query()['rows'][0]
+    def row(self):return next(r for r in self.index.query()['rows'] if r['kind'] in ('ban','timeout','delete'))
     def test_requires_purchase_bot_and_actual_action(self):
         self.action(actor='moderator');self.reward();self.assertIsNone(self.row()['reward_attribution'])
         self.bot();r=self.row();self.assertEqual(r['executors'],['moderator']);self.assertEqual(r['reward_attribution']['buyer'],'buyer')
@@ -51,6 +51,15 @@ class EvidenceTests(unittest.TestCase):
         p={'subscription':{'type':'channel.moderate'},'event':{'broadcaster_user_login':'channel','action':'delete','moderator_user_login':'mod','delete':{'user_login':'target','message_id':'m','message_body':'text'}}}
         e=notification(p,'2026-09-12T12:00:00Z');self.index.ingest(e);self.index.combined.sync(True)
         r=self.row();self.assertEqual(r['executors'],['mod']);self.assertEqual(r['message']['text'],'text')
+    def test_notification_captures_every_automod_hold(self):
+        p={'subscription':{'type':'automod.message.hold'},'event':{'broadcaster_user_login':'channel','user_login':'target','user_name':'Target','user_id':'42','message_id':'held','message':'not public','held_at':'2026-09-12T12:00:00Z'}}
+        e=notification(p,'2026-09-12T12:00:01Z');self.index.ingest(e);self.index.combined.sync(True)
+        stored=self.index.db.execute("SELECT message FROM actions WHERE kind='automod'").fetchone()
+        self.assertEqual(json.loads(stored[0])['text'],'not public')
+        self.assertEqual(self.index.query(kind='automod_ban')['total'],0)
+        self.action(at=millis('2026-09-12T12:00:05Z'),kind='ban')
+        result=self.index.query(kind='automod_ban');self.assertEqual(result['total'],1)
+        ban=result['rows'][0];self.assertEqual(ban['context'][-1]['id'],'held');self.assertTrue(ban['context'][-1]['automod']);self.assertTrue(ban['automod_ban'])
     def test_notifications_ignore_other_actions(self):
         self.assertIsNone(notification({'subscription':{'type':'channel.moderate'},'event':{'action':'vip'}},'2026-09-12T12:00:00Z'))
     def test_subscriptions_only_authorized_selected_channels(self):
@@ -59,8 +68,9 @@ class EvidenceTests(unittest.TestCase):
         service=ModerationEvents(Twitch());calls=[]
         def request(token,path,data=None):calls.append(path);return {'data':[{'broadcaster_login':'channel','broadcaster_id':'2'},{'broadcaster_login':'unselected','broadcaster_id':'3'}]}
         service.request=request
-        subs=service.subscriptions({'access_token':'fake','user_id':'1','login':'mine','scopes':MOD_SCOPES+[REWARD_SCOPE,'user:read:moderated_channels']})
-        self.assertEqual(len(subs),4);self.assertFalse(any(s['condition']['broadcaster_user_id']=='3' for s in subs))
+        subs=service.subscriptions({'access_token':'fake','user_id':'1','login':'mine','scopes':MOD_SCOPES+[REWARD_SCOPE,AUTOMOD_SCOPE,'user:read:moderated_channels']})
+        self.assertEqual(len(subs),6);self.assertFalse(any(s['condition']['broadcaster_user_id']=='3' for s in subs))
+        self.assertEqual(sum(s['type']=='automod.message.hold' for s in subs),2)
         self.assertTrue(all(s['condition']['broadcaster_user_id']=='1' for s in subs if 'redemption' in s['type']))
         self.assertEqual(service.subscriptions({'access_token':'fake','user_id':'1','login':'mine','scopes':['chat:read']}),[])
 

@@ -19,6 +19,12 @@ class RecoveryTests(unittest.TestCase):
         self.service.account=ACCOUNT;self.recovery=Recovery(self.service);self.now=AT/1000+10
     def tearDown(self):self.recovery.close();self.index.close();self.tmp.cleanup()
     def row(self):return self.recovery.db.execute('SELECT * FROM pending').fetchone()
+    def test_new_ban_fetches_without_fifteen_second_wait(self):
+        self.recovery.scan(self.now)
+        with patch.object(self.service,'fetch') as fetch:
+            self.recovery.step(self.now);self.assertEqual(fetch.call_count,1)
+            self.recovery.prioritize('someone');self.recovery.step(self.now+2);self.assertEqual(fetch.call_count,1)
+            self.recovery.step(self.now+3);self.assertEqual(fetch.call_count,2)
     def test_persistent_disconnect_reconnect_and_late_automod(self):
         self.recovery.scan(self.now)
         with patch.object(self.service,'fetch',side_effect=AuthRequired('offline')) as fetch:

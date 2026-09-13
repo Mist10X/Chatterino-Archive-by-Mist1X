@@ -25,11 +25,14 @@ class Worker(threading.Thread):
         index = None
         moderation = None
         try:
+            from pathlib import Path
+            cached=(Path(self.data)/'panel-cache/archive.sqlite3').is_file()
             index = ArchiveIndex(self.data)
             moderation = ModerationIndex(self.data)
             from user_history import UserHistory
             users=UserHistory(index,moderation)
-            next_sync = 0
+            # Serve the persisted index before importing any new source records.
+            next_sync = time.monotonic() + .4 if cached else 0
             while not self.stopped.is_set() or not self.tasks.empty():
                 if not self.stopped.is_set() and time.monotonic() >= next_sync:
                     for store, event in ((index, 'changed'), (moderation, 'moderation_changed')):
